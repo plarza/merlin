@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: test and lint
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # Blacksmith serves actions/cache from a colocated store, so this needs no
+      # replacement action.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # aws-lc-sys arrives through rustls, which matrix-sdk selects with no
+      # opt-out, and it needs cmake at build time.
+      - name: install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  nix:
+    name: nix build and cache
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Pushing the built closure is what makes deploys a download instead of a
+      # rebuild. Without the token the build still runs, it just is not shared.
+      - uses: cachix/cachix-action@v16
+        if: ${{ env.CACHIX_AUTH_TOKEN != '' }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        with:
+          name: ${{ vars.CACHIX_CACHE_NAME || 'merlin' }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - run: nix build .#merlin --print-build-logs
+      - run: nix build .#merlin-sandbox --print-build-logs
+
+      - name: sandbox smoke test
+        run: |
+          set -euo pipefail
+          out=$(echo 'print(6*7)' | ./result/bin/merlin-sandbox python)
+          test "$out" = "42" || { echo "sandbox returned '$out'"; exit 1; }
