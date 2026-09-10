@@ -57,10 +57,10 @@ pub async fn start(
                 .collect();
 
             for name in stale {
-                if let Some((uuid, _)) = live.remove(&name) {
-                    if scheduler.remove(&uuid).await.is_ok() {
-                        tracing::info!(%name, "unscheduled");
-                    }
+                if let Some((uuid, _)) = live.remove(&name)
+                    && scheduler.remove(&uuid).await.is_ok()
+                {
+                    tracing::info!(%name, "unscheduled");
                 }
             }
 

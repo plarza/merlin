@@ -49,17 +49,23 @@ impl Buffers {
             .unwrap_or_default()
     }
 
-    pub fn render(&self, room_id: &str) -> Option<String> {
-        let turns = self.context(room_id);
+    /// Ambient context as prompt text. `skip_last` drops the message currently
+    /// being answered, which the caller passes to the model separately.
+    pub fn render(&self, room_id: &str, skip_last: bool) -> Option<String> {
+        let mut turns = self.context(room_id);
+        if skip_last {
+            turns.pop();
+        }
         if turns.is_empty() {
             return None;
         }
-        let body = turns
-            .iter()
-            .map(|t| format!("{}: {}", t.sender, t.body))
-            .collect::<Vec<_>>()
-            .join("\n");
-        Some(body)
+        Some(
+            turns
+                .iter()
+                .map(|t| format!("{}: {}", t.sender, t.body))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
     }
 }
 
@@ -203,7 +209,7 @@ mod tests {
         b.push("!b", Turn { sender: "@y".into(), body: "two".into() });
         assert_eq!(b.context("!a").len(), 1);
         assert_eq!(b.context("!b")[0].body, "two");
-        assert!(b.render("!missing").is_none());
+        assert!(b.render("!missing", false).is_none());
     }
 
     #[test]
@@ -211,6 +217,8 @@ mod tests {
         let b = Buffers::new(5);
         b.push("!r", Turn { sender: "@aiden".into(), body: "hi".into() });
         b.push("!r", Turn { sender: "@jakob".into(), body: "yo".into() });
-        assert_eq!(b.render("!r").unwrap(), "@aiden: hi\n@jakob: yo");
+        assert_eq!(b.render("!r", false).unwrap(), "@aiden: hi\n@jakob: yo");
+        // skip_last drops the message being answered.
+        assert_eq!(b.render("!r", true).unwrap(), "@aiden: hi");
     }
 }

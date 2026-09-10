@@ -58,10 +58,6 @@ impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Self::plain("user", content)
     }
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self::plain("assistant", content)
-    }
-
     fn plain(role: &str, content: impl Into<String>) -> Self {
         Self {
             role: role.into(),

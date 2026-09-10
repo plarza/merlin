@@ -208,7 +208,7 @@ impl Tools {
                 }
                 let body = hits
                     .iter()
-                    .map(|r| format!("[{}] ({}) {}", r.key, r.category, r.content))
+                    .map(|r| format!("[{}] ({}, {}) {}", r.key, r.category, &r.created_at[..10.min(r.created_at.len())], r.content))
                     .collect::<Vec<_>>()
                     .join("\n");
                 Ok(Outcome::Text(body))
