@@ -92,7 +92,10 @@ impl Sandbox {
             // hard limit so a wedged process dies even if we are not around.
             Err(_) => Ok(Output {
                 stdout: String::new(),
-                stderr: format!("execution exceeded {}s and was killed", self.timeout.as_secs()),
+                stderr: format!(
+                    "execution exceeded {}s and was killed",
+                    self.timeout.as_secs()
+                ),
                 exit_code: None,
                 timed_out: true,
             }),
@@ -124,7 +127,6 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-
     #[test]
     fn truncate_respects_char_boundaries() {
         let s = "é".repeat(100); // 2 bytes each
@@ -136,7 +138,15 @@ mod tests {
     #[tokio::test]
     async fn runs_and_captures_stdout() {
         // Direct runner: no sudo, no wrapper — exercises the plumbing only.
-        let sb = Sandbox::new(vec!["/bin/sh".into(), "-c".into(), "cat >/dev/null; echo ok".into()], 10, "1G".into());
+        let sb = Sandbox::new(
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "cat >/dev/null; echo ok".into(),
+            ],
+            10,
+            "1G".into(),
+        );
         let out = sb.run("python", "print(1)", None).await.unwrap();
         assert_eq!(out.stdout.trim(), "ok");
         assert!(!out.timed_out);
@@ -144,7 +154,11 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_is_reported_not_hung() {
-        let sb = Sandbox::new(vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()], 1, "1G".into());
+        let sb = Sandbox::new(
+            vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()],
+            1,
+            "1G".into(),
+        );
         let out = sb.run("bash", "true", None).await.unwrap();
         assert!(out.timed_out);
         assert!(out.stderr.contains("killed"));

@@ -17,11 +17,7 @@ use crate::matrix::Bot;
 /// Jobs the agent creates through `cron_create` land in SQLite, not in this
 /// process, so a reconcile loop picks them up. Without it a new job would only
 /// fire after a restart, which is not what "schedule this" should mean.
-pub async fn start(
-    store: Arc<Mutex<CronStore>>,
-    agent: Arc<Agent>,
-    bot: Arc<Bot>,
-) -> Result<()> {
+pub async fn start(store: Arc<Mutex<CronStore>>, agent: Arc<Agent>, bot: Arc<Bot>) -> Result<()> {
     let scheduler = JobScheduler::new()
         .await
         .context("creating job scheduler")?;
@@ -98,7 +94,10 @@ pub async fn start(
 }
 
 fn fingerprint(job: &Job) -> String {
-    format!("{}|{}|{}|{}", job.schedule, job.timezone, job.prompt, job.room_id)
+    format!(
+        "{}|{}|{}|{}",
+        job.schedule, job.timezone, job.prompt, job.room_id
+    )
 }
 
 async fn register(

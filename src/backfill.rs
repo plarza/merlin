@@ -10,9 +10,9 @@ use anyhow::{Context, Result};
 use std::sync::Mutex;
 
 use mxlink::MatrixLink;
+use mxlink::matrix_sdk::room::MessagesOptions;
 use mxlink::matrix_sdk::ruma::events::{AnyMessageLikeEventContent, AnySyncTimelineEvent};
 use mxlink::matrix_sdk::ruma::{RoomId, UInt};
-use mxlink::matrix_sdk::room::MessagesOptions;
 
 use crate::config::Config;
 use crate::messages::Archive;
@@ -139,11 +139,9 @@ fn extract(event: &mxlink::matrix_sdk::deserialized_responses::TimelineEvent) ->
         return Extracted::Other;
     }
 
-    let at = chrono::DateTime::from_timestamp_millis(
-        i64::from(message.origin_server_ts().get()),
-    )
-    .map(|t| t.to_rfc3339())
-    .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let at = chrono::DateTime::from_timestamp_millis(i64::from(message.origin_server_ts().get()))
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
     Extracted::Text {
         event_id: message.event_id().to_string(),
@@ -152,4 +150,3 @@ fn extract(event: &mxlink::matrix_sdk::deserialized_responses::TimelineEvent) ->
         at,
     }
 }
-

@@ -117,8 +117,8 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
             || !bytes
                 .get(start - 1)
                 .is_some_and(|b| b.is_ascii_alphanumeric());
-        let after_ok = end >= bytes.len()
-            || !bytes.get(end).is_some_and(|b| b.is_ascii_alphanumeric());
+        let after_ok =
+            end >= bytes.len() || !bytes.get(end).is_some_and(|b| b.is_ascii_alphanumeric());
 
         if before_ok && after_ok {
             return true;
@@ -185,14 +185,27 @@ mod tests {
 
     #[test]
     fn reply_to_bot_addresses_without_a_name() {
-        assert!(is_addressed("what did you mean", &[], UID, "merlin", "merlin", true));
+        assert!(is_addressed(
+            "what did you mean",
+            &[],
+            UID,
+            "merlin",
+            "merlin",
+            true
+        ));
     }
 
     #[test]
     fn ring_buffer_evicts_oldest() {
         let b = Buffers::new(3);
         for i in 0..5 {
-            b.push("!r", Turn { sender: "@a".into(), body: i.to_string() });
+            b.push(
+                "!r",
+                Turn {
+                    sender: "@a".into(),
+                    body: i.to_string(),
+                },
+            );
         }
         let ctx = b.context("!r");
         assert_eq!(ctx.len(), 3);
@@ -203,8 +216,20 @@ mod tests {
     #[test]
     fn buffers_are_per_room() {
         let b = Buffers::new(5);
-        b.push("!a", Turn { sender: "@x".into(), body: "one".into() });
-        b.push("!b", Turn { sender: "@y".into(), body: "two".into() });
+        b.push(
+            "!a",
+            Turn {
+                sender: "@x".into(),
+                body: "one".into(),
+            },
+        );
+        b.push(
+            "!b",
+            Turn {
+                sender: "@y".into(),
+                body: "two".into(),
+            },
+        );
         assert_eq!(b.context("!a").len(), 1);
         assert_eq!(b.context("!b")[0].body, "two");
         assert!(b.render("!missing", false).is_none());
@@ -213,8 +238,20 @@ mod tests {
     #[test]
     fn render_labels_each_line_with_its_sender() {
         let b = Buffers::new(5);
-        b.push("!r", Turn { sender: "@aiden".into(), body: "hi".into() });
-        b.push("!r", Turn { sender: "@jakob".into(), body: "yo".into() });
+        b.push(
+            "!r",
+            Turn {
+                sender: "@aiden".into(),
+                body: "hi".into(),
+            },
+        );
+        b.push(
+            "!r",
+            Turn {
+                sender: "@jakob".into(),
+                body: "yo".into(),
+            },
+        );
         assert_eq!(b.render("!r", false).unwrap(), "@aiden: hi\n@jakob: yo");
         // skip_last drops the message being answered.
         assert_eq!(b.render("!r", true).unwrap(), "@aiden: hi");

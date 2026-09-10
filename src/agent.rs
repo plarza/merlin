@@ -105,7 +105,6 @@ impl Agent {
         }
         Ok(result)
     }
-
 }
 
 /// Assemble the system prompt. Free-standing so it can be tested without
@@ -114,7 +113,9 @@ fn system_prompt(soul: &str, incoming: &Incoming<'_>) -> String {
     let mut prompt = soul.to_string();
 
     if let Some(parent) = &incoming.reply_parent {
-        prompt.push_str(&format!("\n\n## the message being replied to\n\n{parent}\n"));
+        prompt.push_str(&format!(
+            "\n\n## the message being replied to\n\n{parent}\n"
+        ));
     }
 
     if let Some(ambient) = &incoming.ambient {
@@ -140,7 +141,6 @@ mod tests {
             reply_parent: parent.map(str::to_string),
         }
     }
-
 
     #[test]
     fn ambient_context_is_labelled_as_not_for_reply() {

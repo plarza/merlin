@@ -171,7 +171,11 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["name", "schedule", "prompt"]
             }),
         ),
-        f("cron_list", "List scheduled jobs.", json!({ "type": "object", "properties": {} })),
+        f(
+            "cron_list",
+            "List scheduled jobs.",
+            json!({ "type": "object", "properties": {} }),
+        ),
         f(
             "cron_delete",
             "Delete a scheduled job by name.",
@@ -223,7 +227,15 @@ impl Tools {
                 }
                 let body = hits
                     .iter()
-                    .map(|r| format!("[{}] ({}, {}) {}", r.key, r.category, &r.created_at[..10.min(r.created_at.len())], r.content))
+                    .map(|r| {
+                        format!(
+                            "[{}] ({}, {}) {}",
+                            r.key,
+                            r.category,
+                            &r.created_at[..10.min(r.created_at.len())],
+                            r.content
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 Ok(Outcome::Text(body))
@@ -259,10 +271,7 @@ impl Tools {
             "search_messages" => {
                 let query = str_arg(args, "query")?;
                 let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
-                let fuzzy = args
-                    .get("fuzzy")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
+                let fuzzy = args.get("fuzzy").and_then(Value::as_bool).unwrap_or(false);
                 let hits = {
                     let a = self.archive.lock().unwrap();
                     a.search(&query, limit.clamp(1, 30), fuzzy)?
@@ -272,9 +281,7 @@ impl Tools {
                 }
                 let body = hits
                     .iter()
-                    .map(|h| {
-                        format!("[{}] {}: {}", &h.at[..10.min(h.at.len())], h.sender, h.body)
-                    })
+                    .map(|h| format!("[{}] {}: {}", &h.at[..10.min(h.at.len())], h.sender, h.body))
                     .collect::<Vec<_>>()
                     .join("\n");
                 Ok(Outcome::Text(body))
@@ -319,7 +326,10 @@ impl Tools {
                 let body = results
                     .iter()
                     .map(|r| {
-                        let title = r.get("title").and_then(Value::as_str).unwrap_or("(untitled)");
+                        let title = r
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("(untitled)");
                         let url = r.get("url").and_then(Value::as_str).unwrap_or("");
                         let text = r.get("text").and_then(Value::as_str).unwrap_or("");
                         format!("{title}\n{url}\n{}", truncate(text, 900))
@@ -331,9 +341,11 @@ impl Tools {
 
             "web_fetch" => {
                 let url = str_arg(args, "url")?;
-                let body = self.fetch_capped(reqwest::Method::GET, &url, None, None).await?;
-                let text = html2text::from_read(body.as_bytes(), 100)
-                    .unwrap_or_else(|_| body.clone());
+                let body = self
+                    .fetch_capped(reqwest::Method::GET, &url, None, None)
+                    .await?;
+                let text =
+                    html2text::from_read(body.as_bytes(), 100).unwrap_or_else(|_| body.clone());
                 Ok(Outcome::Text(truncate(&text, 12_000)))
             }
 
@@ -419,7 +431,12 @@ impl Tools {
                 }
                 let body = jobs
                     .iter()
-                    .map(|j| format!("{} — '{}' ({}) — {}", j.name, j.schedule, j.timezone, j.prompt))
+                    .map(|j| {
+                        format!(
+                            "{} — '{}' ({}) — {}",
+                            j.name, j.schedule, j.timezone, j.prompt
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 Ok(Outcome::Text(body))
@@ -523,7 +540,6 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-
     #[test]
     fn definitions_cover_the_agreed_surface() {
         let names: Vec<String> = definitions()
@@ -531,14 +547,21 @@ mod tests {
             .map(|d| d["function"]["name"].as_str().unwrap().to_string())
             .collect();
         for expected in [
-            "memory_store", "memory_recall", "memory_forget",
-            "web_search", "web_fetch", "http_request",
-            "generate_image", "run_code",
-            "cron_create", "cron_list", "cron_delete",
-            "search_messages", "time_now",
+            "memory_store",
+            "memory_recall",
+            "memory_forget",
+            "web_search",
+            "web_fetch",
+            "http_request",
+            "generate_image",
+            "run_code",
+            "cron_create",
+            "cron_list",
+            "cron_delete",
+            "search_messages",
+            "time_now",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
     }
-
 }

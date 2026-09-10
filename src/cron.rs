@@ -121,11 +121,9 @@ impl Job {
         // ordinary 5-field crontab syntax, so normalising here keeps the tool
         // surface familiar.
         let expr = self.six_field_schedule();
-        tokio_cron_scheduler::Job::new_async_tz(
-            expr.as_str(),
-            chrono_tz::UTC,
-            |_uuid, _lock| Box::pin(async {}),
-        )
+        tokio_cron_scheduler::Job::new_async_tz(expr.as_str(), chrono_tz::UTC, |_uuid, _lock| {
+            Box::pin(async {})
+        })
         .map_err(|e| anyhow::anyhow!("invalid cron expression '{}': {e}", self.schedule))?;
         Ok(())
     }
@@ -169,7 +167,10 @@ mod tests {
     fn five_field_schedules_gain_a_seconds_column() {
         assert_eq!(job("a", "0 7 * * *").six_field_schedule(), "0 0 7 * * *");
         // Already six fields: left alone.
-        assert_eq!(job("a", "30 0 7 * * *").six_field_schedule(), "30 0 7 * * *");
+        assert_eq!(
+            job("a", "30 0 7 * * *").six_field_schedule(),
+            "30 0 7 * * *"
+        );
     }
 
     #[test]

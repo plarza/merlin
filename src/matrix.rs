@@ -60,11 +60,8 @@ pub async fn connect(config: &Config, secrets: &Secrets) -> Result<MatrixLink> {
         mxlink::helpers::encryption::EncryptionKey::new(digest)
     };
 
-    let persistence = PersistenceConfig::new(
-        state.join("session.json"),
-        Some(key),
-        state.join("matrix"),
-    );
+    let persistence =
+        PersistenceConfig::new(state.join("session.json"), Some(key), state.join("matrix"));
 
     mxlink::init(&InitConfig::new(login, persistence))
         .await
@@ -123,13 +120,7 @@ impl Bot {
         {
             let at = chrono::Utc::now().to_rfc3339();
             let archive = self.archive.lock().unwrap();
-            if let Err(e) = archive.record(
-                event.event_id.as_str(),
-                &room_id,
-                &sender,
-                &body,
-                &at,
-            ) {
+            if let Err(e) = archive.record(event.event_id.as_str(), &room_id, &sender, &body, &at) {
                 tracing::warn!(error = %e, "failed archiving message");
             }
         }
@@ -259,14 +250,12 @@ impl Bot {
             return None;
         };
         let sender = message.sender().to_string();
-        let body = message
-            .original_content()
-            .and_then(|c| match c {
-                mxlink::matrix_sdk::ruma::events::AnyMessageLikeEventContent::RoomMessage(m) => {
-                    Some(m.body().to_string())
-                }
-                _ => None,
-            })?;
+        let body = message.original_content().and_then(|c| match c {
+            mxlink::matrix_sdk::ruma::events::AnyMessageLikeEventContent::RoomMessage(m) => {
+                Some(m.body().to_string())
+            }
+            _ => None,
+        })?;
         Some((sender, body))
     }
 
@@ -282,10 +271,7 @@ impl Bot {
     }
 
     async fn send_image(&self, room: &Room, image: crate::agent::Image) -> Result<()> {
-        let mime: mxlink::mime::Mime = image
-            .media_type
-            .parse()
-            .unwrap_or(mxlink::mime::IMAGE_PNG);
+        let mime: mxlink::mime::Mime = image.media_type.parse().unwrap_or(mxlink::mime::IMAGE_PNG);
 
         let mut content = self
             .link

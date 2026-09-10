@@ -47,7 +47,11 @@ async fn main() -> Result<()> {
         match arg.as_str() {
             "--config" => config_path = args.next().context("--config needs a path")?.into(),
             "--import-memories" => {
-                import_from = Some(args.next().context("--import-memories needs a path")?.into())
+                import_from = Some(
+                    args.next()
+                        .context("--import-memories needs a path")?
+                        .into(),
+                )
             }
             "--import-keys" => {
                 import_keys = Some(args.next().context("--import-keys needs a path")?.into())

@@ -59,7 +59,8 @@ impl Memory {
         let conn = Connection::open(path)
             .with_context(|| format!("opening memory db at {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.execute_batch(SCHEMA).context("creating memory schema")?;
+        conn.execute_batch(SCHEMA)
+            .context("creating memory schema")?;
         Ok(Self { conn })
     }
 
@@ -146,9 +147,8 @@ impl Memory {
         let src = Connection::open(legacy)
             .with_context(|| format!("opening legacy db at {}", legacy.display()))?;
 
-        let mut stmt = src.prepare(
-            "SELECT id, key, content, category, created_at, updated_at FROM memories",
-        )?;
+        let mut stmt =
+            src.prepare("SELECT id, key, content, category, created_at, updated_at FROM memories")?;
         let rows: Vec<(String, String, String, String, String, String)> = stmt
             .query_map([], |r| {
                 Ok((

@@ -81,7 +81,12 @@ pub struct GeneratedImage {
 }
 
 impl Llm {
-    pub fn new(api_key: String, chat_model: String, image_model: String, timeout_s: u64) -> Result<Self> {
+    pub fn new(
+        api_key: String,
+        chat_model: String,
+        image_model: String,
+        timeout_s: u64,
+    ) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_s))
             .build()?;
@@ -120,7 +125,10 @@ impl Llm {
         // it as a parse failure.
         let raw = resp.text().await.map_err(|e| classify(e, "chat"))?;
         let payload: Value = serde_json::from_str(&raw).map_err(|e| {
-            anyhow::anyhow!("OpenRouter chat returned non-JSON ({status}): {e}: {}", head(&raw))
+            anyhow::anyhow!(
+                "OpenRouter chat returned non-JSON ({status}): {e}: {}",
+                head(&raw)
+            )
         })?;
 
         if !status.is_success() {
@@ -162,7 +170,10 @@ impl Llm {
         let status = resp.status();
         let raw = resp.text().await.map_err(|e| classify(e, "images"))?;
         let payload: Value = serde_json::from_str(&raw).map_err(|e| {
-            anyhow::anyhow!("OpenRouter images returned non-JSON ({status}): {e}: {}", head(&raw))
+            anyhow::anyhow!(
+                "OpenRouter images returned non-JSON ({status}): {e}: {}",
+                head(&raw)
+            )
         })?;
 
         if !status.is_success() {
@@ -214,7 +225,11 @@ fn classify(e: reqwest::Error, what: &str) -> anyhow::Error {
 /// First line of a response body, for error messages.
 fn head(raw: &str) -> String {
     let first: String = raw.lines().next().unwrap_or("").chars().take(200).collect();
-    if first.is_empty() { "(empty body)".into() } else { first }
+    if first.is_empty() {
+        "(empty body)".into()
+    } else {
+        first
+    }
 }
 
 #[cfg(test)]
@@ -231,8 +246,6 @@ mod tests {
         // An empty tool_calls list must not be serialised onto a tool result.
         assert!(v.get("tool_calls").is_none());
     }
-
-
 
     #[test]
     fn assistant_tool_call_parses() {
