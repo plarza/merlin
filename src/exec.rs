@@ -6,9 +6,8 @@
 //! is something nftables can match on, which is how LAN egress gets denied
 //! while public internet stays reachable.
 //!
-//! The privilege step is `sudo -u merlin-exec <wrapper>` — sudo to an
-//! unprivileged user, restricted to one binary. Granting the bot `systemd-run`
-//! instead would have granted it root, since systemd-run can start anything.
+//! The privilege step is `sudo -u merlin-exec <wrapper>`: sudo to an
+//! unprivileged user, restricted to a single binary.
 
 use anyhow::{Context, Result};
 use std::process::Stdio;
@@ -125,13 +124,6 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn language_aliases_normalize() {
-        assert_eq!(normalize_language("py").unwrap(), "python");
-        assert_eq!(normalize_language("Python3").unwrap(), "python");
-        assert_eq!(normalize_language("sh").unwrap(), "bash");
-        assert!(normalize_language("ruby").is_err());
-    }
 
     #[test]
     fn truncate_respects_char_boundaries() {

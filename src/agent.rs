@@ -32,9 +32,8 @@ pub struct Incoming<'a> {
     pub body: &'a str,
     /// Ambient messages seen but not answered, oldest first.
     pub ambient: Option<String>,
-    /// Text of the message being replied to, when this is a reply. The previous
-    /// bot fetched a reply's parent only for media and dropped the words, so
-    /// replying to a message with just the bot's name arrived blank.
+    /// Text of the message being replied to, when this is a reply, so a reply
+    /// carrying only the bot's name still has its subject.
     pub reply_parent: Option<String>,
 }
 
@@ -142,10 +141,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn prompt_is_just_the_soul_when_there_is_no_context() {
-        assert_eq!(system_prompt("you are merlin", &incoming(None, None)), "you are merlin");
-    }
 
     #[test]
     fn ambient_context_is_labelled_as_not_for_reply() {

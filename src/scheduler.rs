@@ -1,8 +1,7 @@
 //! Scheduled jobs.
 //!
-//! A firing job has exactly one output path: run the prompt as a turn, post the
-//! result to its room. Nothing else delivers it, which is what stops the same
-//! digest arriving twice.
+//! A firing job has one output path: run the prompt as a turn, post the result
+//! to its room.
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;

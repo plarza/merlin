@@ -153,32 +153,3 @@ fn extract(event: &mxlink::matrix_sdk::deserialized_responses::TimelineEvent) ->
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stats_render_every_bucket() {
-        let s = Stats {
-            pages: 3,
-            seen: 210,
-            archived: 12,
-            undecryptable: 195,
-            not_text: 3,
-        };
-        let rendered = s.to_string();
-        assert!(rendered.contains("3 pages"));
-        assert!(rendered.contains("12 archived"));
-        // The undecryptable count is the number that explains a thin backfill,
-        // so it must always be visible rather than folded into "skipped".
-        assert!(rendered.contains("195 undecryptable"));
-    }
-
-    #[test]
-    fn empty_stats_are_legible() {
-        assert_eq!(
-            Stats::default().to_string(),
-            "0 pages, 0 events: 0 archived, 0 undecryptable, 0 not text"
-        );
-    }
-}

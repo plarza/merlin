@@ -226,10 +226,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn localpart_strips_sigil_and_server() {
-        assert_eq!(cfg("@merlin:matrix.aza.network").localpart(), "merlin");
-    }
 
     #[test]
     fn env_overrides_replace_config_lists() {

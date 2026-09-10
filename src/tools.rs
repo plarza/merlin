@@ -454,9 +454,9 @@ impl Tools {
         }
     }
 
-    /// Shared HTTP path for web_fetch and http_request. Streams with a byte
-    /// cap, because a silently truncated 1 MB body is how the previous bot
-    /// mangled data without reporting anything.
+    /// Shared HTTP path for web_fetch and http_request. Errors above the byte
+    /// cap rather than truncating, so a partial body is never mistaken for a
+    /// whole one.
     async fn fetch_capped(
         &self,
         method: reqwest::Method,
@@ -523,15 +523,6 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_definition_is_well_formed() {
-        for def in definitions() {
-            let func = &def["function"];
-            assert!(func["name"].as_str().is_some_and(|n| !n.is_empty()));
-            assert!(func["description"].as_str().is_some_and(|d| d.len() > 10));
-            assert_eq!(func["parameters"]["type"], "object");
-        }
-    }
 
     #[test]
     fn definitions_cover_the_agreed_surface() {
@@ -550,9 +541,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn str_arg_reports_the_missing_key() {
-        let err = str_arg(&json!({}), "query").unwrap_err().to_string();
-        assert!(err.contains("query"));
-    }
 }

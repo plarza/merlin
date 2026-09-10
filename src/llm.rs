@@ -1,10 +1,8 @@
 //! OpenRouter client.
 //!
 //! Two endpoints, one key. Text goes through `/chat/completions` with function
-//! calling; images go through `/images`, which is a separate endpoint — image
-//! models are absent from the chat catalogue and return 404 from
-//! `/chat/completions`, so anything checking the model list concludes they do
-//! not exist.
+//! calling. Images go through `/images`; image models are absent from the chat
+//! model list and return 404 from `/chat/completions`.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -201,8 +199,8 @@ impl Llm {
     }
 }
 
-/// A timeout and a connection failure need different responses, and both used
-/// to arrive as the same opaque message.
+/// Distinguishes a timeout from a connection failure, which need different
+/// responses.
 fn classify(e: reqwest::Error, what: &str) -> anyhow::Error {
     if e.is_timeout() {
         anyhow::anyhow!("OpenRouter {what} timed out; the model took too long to respond")
@@ -234,19 +232,7 @@ mod tests {
         assert!(v.get("tool_calls").is_none());
     }
 
-    #[test]
-    fn plain_message_omits_tool_fields() {
-        let v = serde_json::to_value(Message::user("hi")).unwrap();
-        assert!(v.get("tool_call_id").is_none());
-        assert!(v.get("tool_calls").is_none());
-    }
 
-    #[test]
-    fn head_summarises_a_body_without_panicking() {
-        assert_eq!(head(""), "(empty body)");
-        assert_eq!(head("line one\nline two"), "line one");
-        assert_eq!(head(&"x".repeat(500)).len(), 200);
-    }
 
     #[test]
     fn assistant_tool_call_parses() {

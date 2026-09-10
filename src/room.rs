@@ -71,9 +71,8 @@ impl Buffers {
 
 /// Whether a message is addressed to the bot.
 ///
-/// The name check is word-boundary, not substring. The previous bot matched any
-/// occurrence, so "merlin" the bird or the wizard woke it, and so did
-/// "merlin dont respond".
+/// The name check is word-boundary, so an unrelated use of the name in ordinary
+/// conversation does not trigger a turn.
 pub fn is_addressed(
     body: &str,
     m_mentions: &[String],
@@ -152,7 +151,6 @@ mod tests {
 
     #[test]
     fn substring_does_not_address() {
-        // The exact class of false positive the previous bot had.
         assert!(!addressed("merlinesque behaviour"));
         assert!(!addressed("submerlin"));
     }

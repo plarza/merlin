@@ -1,10 +1,8 @@
 //! Scheduled jobs, created by the agent at runtime rather than written into
 //! config.
 //!
-//! A firing job has exactly one output path: the scheduler runs the prompt and
-//! posts the result. Nothing else delivers it. The previous bot sent its digest
-//! twice, most likely because a chat-triggered run posted a conversational
-//! reply *and* a separate announce.
+//! A firing job has one output path: the scheduler runs the prompt and posts
+//! the result.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
@@ -110,8 +108,8 @@ impl CronStore {
 }
 
 impl Job {
-    /// Reject a bad expression at creation time, where the agent can see the
-    /// error and correct it, rather than at the next restart.
+    /// Reject a bad expression at creation time, where the agent can correct
+    /// it, rather than at the next restart.
     pub fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty() {
             anyhow::bail!("job name cannot be empty");

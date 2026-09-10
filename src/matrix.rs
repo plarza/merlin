@@ -270,8 +270,7 @@ impl Bot {
         Some((sender, body))
     }
 
-    /// Plain text, no formatted_body: the room should not render markdown the
-    /// agent never intended.
+    /// Plain text with no formatted_body, so nothing renders as markdown.
     async fn send_text(&self, room: &Room, text: &str) -> Result<()> {
         let mut content = RoomMessageEventContent::text_plain(text);
         self.link

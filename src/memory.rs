@@ -1,8 +1,7 @@
 //! Durable memory.
 //!
-//! Deliberately flat: no agent or tenant foreign key. The previous bot keyed
-//! memories to an `agents` row, so renaming it orphaned every record and
-//! recovery meant remapping ids by hand. Here a rename is a config edit.
+//! Flat by design: no agent or tenant foreign key, so renaming the bot does not
+//! orphan its records.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -141,7 +140,7 @@ impl Memory {
             .unwrap_or(0))
     }
 
-    /// One-shot import from the previous bot's `brain.db`, dropping `agent_id`.
+    /// One-shot import from a compatible table, dropping any `agent_id`.
     /// Returns how many rows were taken.
     pub fn import_legacy(&mut self, legacy: &Path) -> Result<usize> {
         let src = Connection::open(legacy)
