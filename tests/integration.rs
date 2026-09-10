@@ -1,8 +1,6 @@
 //! End to end tests against real databases and real processes.
 //!
-//! Everything here goes through the public API on real files,
-//! so a passing run means the SQLite schema,
-//! the FTS indexes and the process plumbing actually work,
+//! Everything here goes through the public API on real files, so a passing run means the SQLite schema, the FTS indexes and the process plumbing actually work,
 //! not that a helper returns what it was told to.
 
 use merlin::cron::{CronStore, Job};
@@ -13,8 +11,7 @@ use merlin::messages::Archive;
 use merlin::room::{Buffers, Turn, is_addressed};
 use merlin::tools::definitions;
 
-/// A unique directory per test,
-/// so runs do not share state.
+/// A unique directory per test, so runs do not share state.
 fn scratch(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "merlin-test-{name}-{}-{}",
@@ -37,35 +34,40 @@ fn memory_survives_reopening_and_recalls_by_keyword() {
 
     {
         let m = Memory::open(&path).unwrap();
-        m.store("zog", "Zog is an alien with his own file", "core", None)
-            .unwrap();
         m.store(
-            "john",
-            "John Carroll is an Australian gymnast",
+            "kettle",
+            "the kettle in the kitchen is broken",
             "core",
             None,
         )
         .unwrap();
-        // Re-filing the same subject revises it.
-        m.store("zog", "Zog is an alien. John hates him", "core", None)
+        m.store("parking", "visitor parking is free after six", "core", None)
             .unwrap();
+        // Re-filing the same subject revises it.
+        m.store(
+            "kettle",
+            "the kettle is broken. a new one is on order",
+            "core",
+            None,
+        )
+        .unwrap();
     }
 
     let m = Memory::open(&path).unwrap();
     assert_eq!(m.count().unwrap(), 2, "upsert must not duplicate a key");
 
-    let hits = m.recall("zog alien", 5).unwrap();
+    let hits = m.recall("kettle broken", 5).unwrap();
     assert_eq!(hits.len(), 1);
     assert!(
-        hits[0].content.contains("John hates him"),
+        hits[0].content.contains("new one is on order"),
         "kept the revision"
     );
 
     // A query that FTS5 would reject as syntax must still be answerable.
     assert!(m.recall("!!!", 5).is_ok());
 
-    assert!(m.forget("zog").unwrap());
-    assert!(!m.forget("zog").unwrap());
+    assert!(m.forget("kettle").unwrap());
+    assert!(!m.forget("kettle").unwrap());
     assert_eq!(m.count().unwrap(), 1);
 }
 
@@ -74,17 +76,17 @@ fn memory_survives_reopening_and_recalls_by_keyword() {
 fn seeded_archive(dir: &std::path::Path) -> Archive {
     let a = Archive::open(&dir.join("messages.db")).unwrap();
     for (i, (sender, body)) in [
-        ("@aiden:x.org", "file the zog shoelace incident"),
-        ("@jakob:y.org", "john carroll is an australian gymnast"),
-        ("@aiden:x.org", "who won the fifa 2025 world cup"),
-        ("@jakob:y.org", "the fifa 2018 world cup was in russia"),
+        ("@alice:example.org", "the shoelace came apart again"),
+        ("@bob:example.org", "the gymnast landed it cleanly"),
+        ("@alice:example.org", "who won the 2025 world cup"),
+        ("@bob:example.org", "the 2018 world cup final was dull"),
     ]
     .iter()
     .enumerate()
     {
         a.record(
             &format!("$e{i}"),
-            "!r:x.org",
+            "!r:example.org",
             sender,
             body,
             "2026-09-10T00:00:00Z",
@@ -107,18 +109,17 @@ fn quoted_terms_are_required_and_combine_with_fuzzy_ones() {
     let dir = scratch("quoted");
     let a = seeded_archive(&dir);
 
-    // Both messages concern the world cup; the quoted year selects one.
-    let hits = a.search("fifa \"2025\" world cup", 5).unwrap();
+    // Both messages concern the world cup, and the quoted year selects one.
+    let hits = a.search("wrold cup \"2025\"", 5).unwrap();
     assert_eq!(hits.len(), 1);
     assert!(hits[0].body.contains("2025"));
 
     // A misspelled loose term alongside a required one.
-    let hits = a.search("wrold \"2018\"", 5).unwrap();
+    let hits = a.search("finl \"2018\"", 5).unwrap();
     assert_eq!(hits.len(), 1);
     assert!(hits[0].body.contains("2018"));
 
-    // Quoting alone is an exact search,
-    // so a near miss finds nothing.
+    // Quoting alone is an exact search, so a near miss finds nothing.
     assert_eq!(a.search("\"gymnast\"", 5).unwrap().len(), 1);
     assert!(a.search("\"gymnasts\"", 5).unwrap().is_empty());
 }
@@ -138,14 +139,20 @@ fn an_event_is_archived_once_however_often_sync_replays_it() {
     let dir = scratch("dupes");
     let a = seeded_archive(&dir);
     let before = a.count().unwrap();
-    a.record("$e0", "!r:x.org", "@aiden:x.org", "different text", "now")
-        .unwrap();
+    a.record(
+        "$e0",
+        "!r:example.org",
+        "@alice:example.org",
+        "different text",
+        "now",
+    )
+    .unwrap();
     assert_eq!(a.count().unwrap(), before);
 }
 
 // ── addressing ──────────────────────────────────────────────────────────────
 
-const UID: &str = "@merlin:matrix.aza.network";
+const UID: &str = "@merlin:example.org";
 
 fn addressed(body: &str) -> bool {
     is_addressed(body, &[], UID, "merlin", "merlin", false)
@@ -156,10 +163,9 @@ fn a_turn_starts_only_when_the_bot_is_actually_addressed() {
     assert!(addressed("merlin what day is it"));
     assert!(addressed("hey Merlin, you there?"));
     assert!(addressed("@merlin hello"));
-    assert!(addressed("ask @merlin:matrix.aza.network about it"));
+    assert!(addressed("ask @merlin:example.org about it"));
 
-    // Word boundary,
-    // so the bird and the wizard do not wake it.
+    // Word boundary, so the bird and the wizard do not wake it.
     assert!(!addressed("merlinesque behaviour"));
     assert!(!addressed("submerlin"));
     assert!(!addressed("what do you reckon about the game"));
@@ -188,7 +194,7 @@ fn an_explicit_mention_list_decides_in_both_directions() {
     ));
     assert!(!is_addressed(
         "merlin is a bird",
-        &["@jakob:sadairs.com".to_string()],
+        &["@bob:example.org".to_string()],
         UID,
         "merlin",
         "merlin",
@@ -236,7 +242,7 @@ fn job(name: &str, schedule: &str) -> Job {
         schedule: schedule.into(),
         timezone: "Australia/Sydney".into(),
         prompt: "post the digest".into(),
-        room_id: "!r:x.org".into(),
+        room_id: "!r:example.org".into(),
         enabled: true,
     }
 }
@@ -333,7 +339,7 @@ fn tool_results_and_calls_match_the_openai_wire_format() {
         "tool_calls": [{
             "id": "c1",
             "type": "function",
-            "function": { "name": "memory_recall", "arguments": "{\"query\":\"zog\"}" }
+            "function": { "name": "memory_recall", "arguments": "{\"query\":\"kettle\"}" }
         }]
     }))
     .unwrap();
@@ -347,8 +353,7 @@ fn every_tool_the_agent_is_offered_is_described() {
         .map(|d| {
             let f = &d["function"];
             assert_eq!(f["parameters"]["type"], "object");
-            // The description is the only thing telling the model when to reach for a tool,
-            // so an empty one is a real defect.
+            // The description is the only thing telling the model when to reach for a tool, so an empty one is a real defect.
             assert!(f["description"].as_str().unwrap().len() > 20);
             f["name"].as_str().unwrap().to_string()
         })
