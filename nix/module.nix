@@ -8,8 +8,27 @@ let
   system = pkgs.stdenv.hostPlatform.system;
   merlinPkg = self.packages.${system}.merlin;
   sandboxPkg = self.packages.${system}.merlin-sandbox;
+  rootfsTarball = self.packages.${system}.sandbox-rootfs;
+
+  # Public resolvers, because the host's nameserver is a LAN address and LAN
+  # egress is exactly what the sandbox is denied. Without this, name resolution
+  # inside the sandbox fails and every fetch looks like a network outage.
+  sandboxResolvConf = pkgs.writeText "merlin-sandbox-resolv.conf" ''
+    nameserver 1.1.1.1
+    nameserver 8.8.8.8
+    options edns0
+  '';
 
   configFile = (pkgs.formats.toml { }).generate "merlin-config.toml" cfg.settings;
+
+  sandboxWrapper = pkgs.writeShellApplication {
+    name = "merlin-sandbox-configured";
+    text = ''
+      export MERLIN_SANDBOX_ROOT=${cfg.sandboxRoot}
+      export MERLIN_WORKSPACE=${cfg.workspaceDir}
+      exec ${lib.getExe sandboxPkg} "$@"
+    '';
+  };
 in
 {
   options.services.merlin = {
@@ -23,6 +42,26 @@ in
     stateDir = mkOption {
       type = types.path;
       default = "/var/lib/merlin";
+    };
+
+    sandboxRoot = mkOption {
+      type = types.path;
+      default = "/var/lib/merlin-sandbox";
+      description = ''
+        Persistent root filesystem for executed code. The agent is root inside
+        it and may install whatever it likes; nothing here is visible to the
+        rest of the host.
+      '';
+    };
+
+    workspaceDir = mkOption {
+      type = types.path;
+      default = "/var/lib/merlin-workspace";
+      description = ''
+        The agent's files, shared between the bot's file tools and the sandbox,
+        where it appears as /work. Separate from {option}`sandboxRoot` so the
+        bot never needs read access to the sandbox's operating system.
+      '';
     };
 
     environmentFile = mkOption {
@@ -53,6 +92,7 @@ in
     users.users.merlin = {
       isSystemUser = true;
       group = "merlin";
+      extraGroups = [ "merlin-work" ];
       home = cfg.stateDir;
     };
     users.groups.merlin = { };
@@ -63,9 +103,14 @@ in
     users.users.merlin-exec = {
       isSystemUser = true;
       group = "merlin-exec";
+      extraGroups = [ "merlin-work" ];
       home = "/var/empty";
     };
     users.groups.merlin-exec = { };
+
+    # The one thing the two users share: the workspace. The sandbox root itself
+    # stays readable only by merlin-exec.
+    users.groups.merlin-work = { };
 
     # merlin may become merlin-exec, and only to run the sandbox wrapper. This
     # is not a path to root: the target user is less privileged than merlin.
@@ -75,7 +120,7 @@ in
         runAs = "merlin-exec";
         commands = [
           {
-            command = "${lib.getExe sandboxPkg}";
+            command = "${lib.getExe sandboxWrapper}";
             options = [ "NOPASSWD" "NOSETENV" ];
           }
         ];
@@ -90,6 +135,10 @@ in
     # kube-proxy programs iptables directly, and switching the backend
     # underneath it risks cluster networking.
     networking.firewall.extraCommands = ''
+      ${lib.concatMapStrings (net: ''
+        ip6tables -w -C OUTPUT -m owner --uid-owner merlin-exec -d ${net} -j REJECT 2>/dev/null || \
+          ip6tables -w -I OUTPUT -m owner --uid-owner merlin-exec -d ${net} -j REJECT
+      '') [ "::1/128" "fe80::/10" "fc00::/7" ]}
       iptables -w -C OUTPUT -m owner --uid-owner merlin-exec -d 10.0.0.0/8 -j REJECT 2>/dev/null || \
         iptables -w -I OUTPUT -m owner --uid-owner merlin-exec -d 10.0.0.0/8 -j REJECT
       iptables -w -C OUTPUT -m owner --uid-owner merlin-exec -d 172.16.0.0/12 -j REJECT 2>/dev/null || \
@@ -103,6 +152,9 @@ in
     '';
 
     networking.firewall.extraStopCommands = ''
+      ${lib.concatMapStrings (net: ''
+        ip6tables -w -D OUTPUT -m owner --uid-owner merlin-exec -d ${net} -j REJECT 2>/dev/null || true
+      '') [ "::1/128" "fe80::/10" "fc00::/7" ]}
       iptables -w -D OUTPUT -m owner --uid-owner merlin-exec -d 10.0.0.0/8 -j REJECT 2>/dev/null || true
       iptables -w -D OUTPUT -m owner --uid-owner merlin-exec -d 172.16.0.0/12 -j REJECT 2>/dev/null || true
       iptables -w -D OUTPUT -m owner --uid-owner merlin-exec -d 192.168.0.0/16 -j REJECT 2>/dev/null || true
@@ -110,17 +162,59 @@ in
       iptables -w -D OUTPUT -m owner --uid-owner merlin-exec -d 127.0.0.0/8 -j REJECT 2>/dev/null || true
     '';
 
+    environment.systemPackages = [ sandboxWrapper ];
+
     systemd.tmpfiles.rules = [
       "d ${cfg.stateDir} 0700 merlin merlin -"
+      # Private to the sandbox uid: this is its operating system, not shared state.
+      "d ${cfg.sandboxRoot} 0700 merlin-exec merlin-exec -"
+      # Setgid so files created by either side stay group-writable by the other.
+      "d ${cfg.workspaceDir} 2770 merlin merlin-work -"
       "L+ ${cfg.stateDir}/SOUL.md - - - - ${pkgs.writeText "merlin-soul" cfg.soul}"
       "L+ ${cfg.stateDir}/config.toml - - - - ${configFile}"
     ];
 
+    # Unpacks the base userland once. Anything the agent installs afterwards
+    # persists, and re-running this never overwrites it.
+    systemd.services.merlin-sandbox-init = {
+      description = "Initialise merlin's sandbox root";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "merlin.service" ];
+      path = with pkgs; [ gnutar gzip coreutils ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      script = ''
+        set -eu
+        root="${cfg.sandboxRoot}"
+        if [ ! -x "$root/bin/busybox" ]; then
+          echo "unpacking base userland into $root"
+          tar -xzf ${rootfsTarball} -C "$root"
+          chown -R merlin-exec:merlin-exec "$root"
+        fi
+        install -m 0644 ${sandboxResolvConf} "$root/etc/resolv.conf"
+        chown merlin-exec:merlin-exec "$root/etc/resolv.conf"
+        mkdir -p "$root/work"
+
+        # A useful starting point rather than a bare busybox. The agent can add
+        # anything else itself, and whatever it adds persists.
+        if [ ! -x "$root/usr/bin/curl" ]; then
+          echo "installing base tools"
+          chroot "$root" /sbin/apk add --no-cache \
+            bash curl git jq python3 py3-pip ripgrep file tar || \
+            echo "base tool install failed; the agent can still apk add later" >&2
+          chown -R merlin-exec:merlin-exec "$root"
+        fi
+      '';
+    };
+
     systemd.services.merlin = {
       description = "merlin Matrix assistant";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
+      after = [ "network-online.target" "merlin-sandbox-init.service" ];
       wants = [ "network-online.target" ];
+      requires = [ "merlin-sandbox-init.service" ];
 
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} --config ${cfg.stateDir}/config.toml";
@@ -131,7 +225,11 @@ in
         # left the message archive and memory readable by every user on the
         # host. UMask covers files the process creates afterwards.
         StateDirectoryMode = "0700";
-        UMask = "0077";
+        # 0007 rather than 0077: the workspace is shared with the sandbox uid
+        # through the merlin-work group, and 0077 would make every file the bot
+        # writes unreadable to the code it then asks to run. The state directory
+        # stays 0700, so this widens nothing outside the workspace.
+        UMask = "0007";
         WorkingDirectory = cfg.stateDir;
         EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
         Restart = "on-failure";
@@ -144,6 +242,7 @@ in
         ProtectKernelTunables = true;
         ProtectControlGroups = true;
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
+        SupplementaryGroups = [ "merlin-work" ];
       };
 
       environment.RUST_LOG = lib.mkDefault "merlin=info,warn";

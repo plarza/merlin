@@ -11,7 +11,12 @@
       forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
-      packages = forAll (pkgs: {
+      packages = forAll (pkgs:
+        # The sandbox is Linux-only: it rests on user namespaces and bubblewrap.
+        # Darwin still builds the bot itself, which is what the dev shell needs.
+        nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+        inherit (self.legacyPackages.${pkgs.stdenv.hostPlatform.system}) sandbox-rootfs merlin-sandbox;
+      } // {
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.merlin;
 
         merlin = pkgs.rustPlatform.buildRustPackage {
@@ -31,55 +36,95 @@
           };
         };
 
-        # The only thing merlin may invoke through sudo. Kept minimal and
-        # auditable: it takes a language on argv, source on stdin, and runs it
-        # under a namespace with no view of the host filesystem.
+      });
+
+      legacyPackages = forAll (pkgs: nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+        # The base userland for the sandbox, unpacked once into a persistent
+        # directory. Alpine rather than a Nix closure because the point is that
+        # the agent can install its own tools, and apk is a package manager it
+        # can drive on its own.
+        sandbox-rootfs =
+          let
+            version = "3.24.1";
+            source = {
+              x86_64-linux = {
+                arch = "x86_64";
+                hash = "sha256-Qfc+PPX6kZuKpcprMNxI8NonIHdtdCPip3SCEUVv4IE=";
+              };
+              aarch64-linux = {
+                arch = "aarch64";
+                hash = "sha256-9VqQ9pBSxb1vkssJqPRwZZcIMLGUyRegBvuUAo5yElk=";
+              };
+            }.${pkgs.stdenv.hostPlatform.system} or null;
+          in
+          if source == null then null else
+          pkgs.fetchurl {
+            url = "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/${source.arch}/alpine-minirootfs-${version}-${source.arch}.tar.gz";
+            inherit (source) hash;
+          };
+
+        # The only thing merlin may invoke through sudo. It takes a language on
+        # argv and a script on stdin, and runs it inside a persistent root that
+        # has no view of the host at all.
         merlin-sandbox = pkgs.writeShellApplication {
           name = "merlin-sandbox";
-          runtimeInputs = with pkgs; [ bubblewrap coreutils python3 bash ];
+          runtimeInputs = with pkgs; [ bubblewrap coreutils ];
           text = ''
             set -uo pipefail
 
-            lang="''${1:-python}"
+            lang="''${1:-bash}"
             timeout_s="''${MERLIN_EXEC_TIMEOUT:-60}"
+            root="''${MERLIN_SANDBOX_ROOT:-/var/lib/merlin-sandbox}"
+            work="''${MERLIN_WORKSPACE:-/var/lib/merlin-workspace}"
 
-            work="$(mktemp -d)"
-            trap 'rm -rf "$work"' EXIT
-            cat > "$work/job"
+            if [ ! -x "$root/bin/busybox" ]; then
+              echo "sandbox root at $root is not initialised" >&2
+              exit 3
+            fi
+
+            job="$(mktemp -d)"
+            trap 'rm -rf "$job"' EXIT
+            cat > "$job/script"
 
             case "$lang" in
-              python) interp=(python3 /work/job) ;;
-              bash)   interp=(bash /work/job) ;;
+              python) interp=(python3 /job/script) ;;
+              bash|sh) interp=(/bin/sh /job/script) ;;
               *) echo "unsupported language: $lang" >&2; exit 2 ;;
             esac
 
-            # --unshare-all drops every namespace, then --share-net puts the
-            # network back: scripts can fetch their own data. Only /nix/store
-            # and the scratch dir are visible, so there is no path to
-            # /var/lib/merlin, /run/secrets or anything else on the host.
+            # The workspace is shared with the bot through a group, and the
+            # default 022 would leave everything the sandbox writes read-only to
+            # it, so edit_file would fail on the sandbox's own output.
+            umask 007
+
+            # A runaway process count is the one resource bwrap does not bound,
+            # and a fork bomb inside the namespace is still host processes.
+            ulimit -u 512 || true
+            ulimit -f 4194304 || true
+
+            # --unshare-all drops every namespace, --share-net puts the network
+            # back so the agent can fetch and install things. --unshare-user
+            # with --uid 0 makes it root inside its own root only: apk works,
+            # while the host sees an unprivileged uid that the firewall matches
+            # on. Nothing from the host is bound in, so there is no path to
+            # /nix/store, /var/lib/merlin or /run/secrets to begin with.
             exec timeout --signal=KILL "$timeout_s" \
               bwrap \
                 --unshare-all --share-net \
+                --unshare-user --uid 0 --gid 0 \
+                --cap-drop ALL \
                 --die-with-parent \
                 --new-session \
-                --ro-bind /nix/store /nix/store \
-                --ro-bind-try /etc/ssl /etc/ssl \
-                --ro-bind-try /etc/static/ssl /etc/static/ssl \
-                --ro-bind-try /etc/pki /etc/pki \
-                --ro-bind-try /etc/resolv.conf /etc/resolv.conf \
-                --ro-bind-try /etc/hosts /etc/hosts \
-                --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf \
-                --ro-bind-try /etc/services /etc/services \
-                --ro-bind-try /etc/protocols /etc/protocols \
+                --bind "$root" / \
+                --bind "$work" /work \
+                --ro-bind "$job" /job \
                 --proc /proc \
                 --dev /dev \
-                --tmpfs /tmp \
-                --bind "$work" /work \
+                --tmpfs /run \
                 --chdir /work \
-                --setenv HOME /work \
-                --setenv PATH /usr/bin:/bin \
-                --setenv SSL_CERT_FILE /etc/ssl/certs/ca-certificates.crt \
-                --ro-bind "$(dirname "$(readlink -f "$(command -v python3)")")" /usr/bin \
+                --setenv HOME /root \
+                --setenv PATH /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+                --setenv TMPDIR /tmp \
                 "''${interp[@]}"
           '';
         };
