@@ -114,10 +114,16 @@ impl Llm {
             .json(&body)
             .send()
             .await
-            .context("calling OpenRouter chat")?;
+            .map_err(|e| classify(e, "chat"))?;
 
         let status = resp.status();
-        let payload: Value = resp.json().await.context("decoding chat response")?;
+        // Read as text first: reqwest's timeout covers the body, so a slow
+        // model surfaces here rather than at send(), and .json() would report
+        // it as a parse failure.
+        let raw = resp.text().await.map_err(|e| classify(e, "chat"))?;
+        let payload: Value = serde_json::from_str(&raw).map_err(|e| {
+            anyhow::anyhow!("OpenRouter chat returned non-JSON ({status}): {e}: {}", head(&raw))
+        })?;
 
         if !status.is_success() {
             bail!(
@@ -153,10 +159,13 @@ impl Llm {
             .json(&body)
             .send()
             .await
-            .context("calling OpenRouter images")?;
+            .map_err(|e| classify(e, "images"))?;
 
         let status = resp.status();
-        let payload: Value = resp.json().await.context("decoding image response")?;
+        let raw = resp.text().await.map_err(|e| classify(e, "images"))?;
+        let payload: Value = serde_json::from_str(&raw).map_err(|e| {
+            anyhow::anyhow!("OpenRouter images returned non-JSON ({status}): {e}: {}", head(&raw))
+        })?;
 
         if !status.is_success() {
             bail!(
@@ -192,6 +201,24 @@ impl Llm {
     }
 }
 
+/// A timeout and a connection failure need different responses, and both used
+/// to arrive as the same opaque message.
+fn classify(e: reqwest::Error, what: &str) -> anyhow::Error {
+    if e.is_timeout() {
+        anyhow::anyhow!("OpenRouter {what} timed out; the model took too long to respond")
+    } else if e.is_connect() {
+        anyhow::anyhow!("could not reach OpenRouter {what}: {e}")
+    } else {
+        anyhow::anyhow!("OpenRouter {what} request failed: {e}")
+    }
+}
+
+/// First line of a response body, for error messages.
+fn head(raw: &str) -> String {
+    let first: String = raw.lines().next().unwrap_or("").chars().take(200).collect();
+    if first.is_empty() { "(empty body)".into() } else { first }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +239,13 @@ mod tests {
         let v = serde_json::to_value(Message::user("hi")).unwrap();
         assert!(v.get("tool_call_id").is_none());
         assert!(v.get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn head_summarises_a_body_without_panicking() {
+        assert_eq!(head(""), "(empty body)");
+        assert_eq!(head("line one\nline two"), "line one");
+        assert_eq!(head(&"x".repeat(500)).len(), 200);
     }
 
     #[test]

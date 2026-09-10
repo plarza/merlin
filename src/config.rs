@@ -202,7 +202,7 @@ fn default_chat_model() -> String { "z-ai/glm-5.3-flash".into() }
 fn default_image_model() -> String { "meta/muse-image".into() }
 fn default_max_response_bytes() -> usize { 8 * 1024 * 1024 }
 fn default_tool_iterations() -> usize { 6 }
-fn default_request_timeout_s() -> u64 { 60 }
+fn default_request_timeout_s() -> u64 { 120 }
 fn default_exec_timeout_s() -> u64 { 60 }
 fn default_exec_memory_max() -> String { "1G".into() }
 fn default_state_dir() -> PathBuf { PathBuf::from("/var/lib/merlin") }
