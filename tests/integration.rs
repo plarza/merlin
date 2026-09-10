@@ -56,7 +56,7 @@ fn memory_survives_reopening_and_recalls_by_keyword() {
     let m = Memory::open(&path).unwrap();
     assert_eq!(m.count().unwrap(), 2, "upsert must not duplicate a key");
 
-    let hits = m.recall("kettle broken", 5).unwrap();
+    let hits = m.recall("kettle broken", None, 5).unwrap();
     assert_eq!(hits.len(), 1);
     assert!(
         hits[0].content.contains("new one is on order"),
@@ -64,7 +64,7 @@ fn memory_survives_reopening_and_recalls_by_keyword() {
     );
 
     // A query that FTS5 would reject as syntax must still be answerable.
-    assert!(m.recall("!!!", 5).is_ok());
+    assert!(m.recall("!!!", None, 5).is_ok());
 
     assert!(m.forget("kettle").unwrap());
     assert!(!m.forget("kettle").unwrap());
@@ -99,7 +99,7 @@ fn seeded_archive(dir: &std::path::Path) -> Archive {
 #[test]
 fn bare_words_tolerate_misspelling() {
     let dir = scratch("fuzzy");
-    let hits = seeded_archive(&dir).search("shoelase", 5).unwrap();
+    let hits = seeded_archive(&dir).search("shoelase", None, 5).unwrap();
     assert_eq!(hits.len(), 1);
     assert!(hits[0].body.contains("shoelace"));
 }
@@ -110,28 +110,28 @@ fn quoted_terms_are_required_and_combine_with_fuzzy_ones() {
     let a = seeded_archive(&dir);
 
     // Both messages concern the world cup, and the quoted year selects one.
-    let hits = a.search("wrold cup \"2025\"", 5).unwrap();
+    let hits = a.search("wrold cup \"2025\"", None, 5).unwrap();
     assert_eq!(hits.len(), 1);
     assert!(hits[0].body.contains("2025"));
 
     // A misspelled loose term alongside a required one.
-    let hits = a.search("finl \"2018\"", 5).unwrap();
+    let hits = a.search("finl \"2018\"", None, 5).unwrap();
     assert_eq!(hits.len(), 1);
     assert!(hits[0].body.contains("2018"));
 
     // Quoting alone is an exact search, so a near miss finds nothing.
-    assert_eq!(a.search("\"gymnast\"", 5).unwrap().len(), 1);
-    assert!(a.search("\"gymnasts\"", 5).unwrap().is_empty());
+    assert_eq!(a.search("\"gymnast\"", None, 5).unwrap().len(), 1);
+    assert!(a.search("\"gymnasts\"", None, 5).unwrap().is_empty());
 }
 
 #[test]
 fn search_rejects_nothing_and_finds_nothing_for_unrelated_queries() {
     let dir = scratch("edges");
     let a = seeded_archive(&dir);
-    assert!(a.search("s&p", 5).is_ok());
-    assert!(a.search("???", 5).is_ok());
-    assert!(a.search("", 5).unwrap().is_empty());
-    assert!(a.search("elephant", 5).unwrap().is_empty());
+    assert!(a.search("s&p", None, 5).is_ok());
+    assert!(a.search("???", None, 5).is_ok());
+    assert!(a.search("", None, 5).unwrap().is_empty());
+    assert!(a.search("elephant", None, 5).unwrap().is_empty());
 }
 
 #[test]
@@ -160,6 +160,247 @@ fn an_event_is_archived_once_however_often_sync_replays_it() {
     )
     .unwrap();
     assert_eq!(a.count().unwrap(), before);
+}
+
+// ── semantic search ─────────────────────────────────────────────────────────
+
+/// A stand-in embedding with three axes the tests can reason about, so a "nearest" result is checkable rather than opaque.
+/// The real model returns 768 components; the storage and ranking path is identical either way.
+fn vector(x: f32, y: f32, z: f32) -> Vec<f32> {
+    vec![x, y, z]
+}
+
+const MODEL: &str = "test/embedding-model";
+
+#[test]
+fn semantic_recall_ranks_memories_by_direction_not_magnitude() {
+    let dir = scratch("semantic-memory");
+    let mut m = Memory::open(&dir.join("memory.db")).unwrap();
+    m.enable_semantic(MODEL, 3).unwrap();
+
+    m.store("boiler", "the heating packed up", "core", None)
+        .unwrap();
+    m.store("parking", "visitor parking is free after six", "core", None)
+        .unwrap();
+
+    let pending = m.pending_embeddings(10).unwrap();
+    assert_eq!(pending.len(), 2, "nothing is embedded until the loop runs");
+
+    let vectors: Vec<(i64, Vec<f32>)> = pending
+        .iter()
+        .map(|(id, text)| {
+            // Deliberately not unit length: Matryoshka truncation returns short vectors, so cosine has to rank on direction alone.
+            let v = if text.contains("heating") {
+                vector(0.31, 0.0, 0.0)
+            } else {
+                vector(0.0, 1.0, 0.0)
+            };
+            (*id, v)
+        })
+        .collect();
+    assert_eq!(m.save_embeddings(&vectors).unwrap(), 2);
+    assert!(m.pending_embeddings(10).unwrap().is_empty());
+
+    // A query along the heating axis at a wildly different scale.
+    let hits = m
+        .recall("heating trouble", Some(&vector(9.7, 0.0, 0.0)), 2)
+        .unwrap();
+    assert_eq!(hits[0].key, "boiler");
+    assert_eq!(hits[1].key, "parking");
+}
+
+#[test]
+fn revising_a_memory_re_embeds_it() {
+    let dir = scratch("semantic-revise");
+    let mut m = Memory::open(&dir.join("memory.db")).unwrap();
+    m.enable_semantic(MODEL, 3).unwrap();
+
+    m.store("kettle", "the kettle is broken", "core", None)
+        .unwrap();
+    let pending = m.pending_embeddings(10).unwrap();
+    m.save_embeddings(&[(pending[0].0, vector(1.0, 0.0, 0.0))])
+        .unwrap();
+    assert!(m.pending_embeddings(10).unwrap().is_empty());
+
+    // The row keeps its rowid, so a stale vector would go on describing the old text.
+    m.store("kettle", "the kettle was replaced on tuesday", "core", None)
+        .unwrap();
+    assert_eq!(
+        m.pending_embeddings(10).unwrap().len(),
+        1,
+        "revised content must be queued for re-embedding"
+    );
+}
+
+#[test]
+fn forgetting_a_memory_takes_its_vector_with_it() {
+    let dir = scratch("semantic-forget");
+    let mut m = Memory::open(&dir.join("memory.db")).unwrap();
+    m.enable_semantic(MODEL, 3).unwrap();
+
+    m.store("doomed", "this will be deleted", "core", None)
+        .unwrap();
+    let pending = m.pending_embeddings(10).unwrap();
+    m.save_embeddings(&[(pending[0].0, vector(1.0, 0.0, 0.0))])
+        .unwrap();
+
+    m.forget("doomed").unwrap();
+
+    let hits = m
+        .recall("deleted thing", Some(&vector(1.0, 0.0, 0.0)), 5)
+        .unwrap();
+    assert!(
+        hits.iter().all(|h| h.key != "doomed"),
+        "a deleted memory must not still be reachable by meaning, found {hits:?}"
+    );
+
+    // SQLite hands the freed rowid to the next insert, so a surviving vector would answer for an unrelated memory.
+    m.store("fresh", "something else entirely", "core", None)
+        .unwrap();
+    assert_eq!(
+        m.pending_embeddings(10).unwrap().len(),
+        1,
+        "the reused rowid must not inherit a vector"
+    );
+}
+
+#[test]
+fn changing_the_embedding_model_discards_incompatible_vectors() {
+    let dir = scratch("semantic-model-swap");
+    let path = dir.join("memory.db");
+
+    {
+        let mut m = Memory::open(&path).unwrap();
+        m.enable_semantic(MODEL, 3).unwrap();
+        m.store("a", "some note", "core", None).unwrap();
+        let pending = m.pending_embeddings(10).unwrap();
+        m.save_embeddings(&[(pending[0].0, vector(1.0, 0.0, 0.0))])
+            .unwrap();
+        assert!(m.pending_embeddings(10).unwrap().is_empty());
+    }
+
+    // A different width cannot be compared against the stored vectors at all.
+    let m = Memory::open(&path).unwrap();
+    m.enable_semantic("test/other-model", 4).unwrap();
+    assert_eq!(
+        m.pending_embeddings(10).unwrap().len(),
+        1,
+        "vectors from another model must be rebuilt, not reused"
+    );
+}
+
+#[test]
+fn quoted_terms_filter_and_the_rest_ranks_by_meaning() {
+    let dir = scratch("semantic-combined");
+    let mut a = Archive::open(&dir.join("messages.db")).unwrap();
+    a.enable_semantic(MODEL, 3).unwrap();
+
+    // Two mention 2025, one does not. Two are about the world cup, one is not.
+    let rows = [
+        ("$a", "@sam:x", "the world cup final was in 2025"),
+        ("$b", "@lee:x", "quarterly revenue for 2025 was strong"),
+        ("$c", "@kim:x", "the world cup was thrilling"),
+    ];
+    for (i, (id, sender, body)) in rows.iter().enumerate() {
+        a.record(
+            id,
+            "!r:x",
+            sender,
+            body,
+            &format!("2026-01-0{}T00:00:00Z", i + 1),
+        )
+        .unwrap();
+    }
+
+    let pending = a.pending_embeddings(10).unwrap();
+    let vectors: Vec<(i64, Vec<f32>)> = pending
+        .iter()
+        .map(|(id, text)| {
+            let v = if text.contains("world cup") {
+                vector(1.0, 0.0, 0.0)
+            } else {
+                vector(0.0, 1.0, 0.0)
+            };
+            (*id, v)
+        })
+        .collect();
+    a.save_embeddings(&vectors).unwrap();
+
+    // `world cup "2025"`: 2025 is a requirement, the rest is meaning.
+    let hits = a
+        .search("world cup \"2025\"", Some(&vector(1.0, 0.0, 0.0)), 5)
+        .unwrap();
+
+    let bodies: Vec<&str> = hits.iter().map(|h| h.body.as_str()).collect();
+    assert!(
+        !bodies.contains(&"the world cup was thrilling"),
+        "a message without the required term must be excluded however well it matches in meaning, got {bodies:?}"
+    );
+    assert_eq!(
+        bodies,
+        vec![
+            "the world cup final was in 2025",
+            "quarterly revenue for 2025 was strong"
+        ],
+        "both keep 2025; the world cup one ranks first on meaning"
+    );
+}
+
+#[test]
+fn an_all_quoted_query_stays_exact() {
+    let dir = scratch("semantic-quoted-only");
+    let mut a = Archive::open(&dir.join("messages.db")).unwrap();
+    a.enable_semantic(MODEL, 3).unwrap();
+    a.record(
+        "$a",
+        "!r:x",
+        "@sam:x",
+        "the invoice went out friday",
+        "2026-01-01T00:00:00Z",
+    )
+    .unwrap();
+    a.record(
+        "$b",
+        "!r:x",
+        "@lee:x",
+        "lunch was excellent",
+        "2026-01-02T00:00:00Z",
+    )
+    .unwrap();
+    let pending = a.pending_embeddings(10).unwrap();
+    let vectors: Vec<(i64, Vec<f32>)> = pending
+        .iter()
+        .map(|(id, _)| (*id, vector(1.0, 0.0, 0.0)))
+        .collect();
+    a.save_embeddings(&vectors).unwrap();
+
+    // Nothing unquoted means nothing to embed, so identical vectors cannot muddle the result.
+    let hits = a.search("\"invoice\"", None, 5).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].sender, "@sam:x");
+}
+
+#[test]
+fn search_falls_back_to_matching_text_when_nothing_is_embedded_yet() {
+    let dir = scratch("semantic-backfilling");
+    let a = Archive::open(&dir.join("messages.db")).unwrap();
+    a.enable_semantic(MODEL, 3).unwrap();
+    a.record(
+        "$a",
+        "!r:x",
+        "@sam:x",
+        "the shoelace snapped",
+        "2026-01-01T00:00:00Z",
+    )
+    .unwrap();
+
+    // Mid-backfill every row is pending, so ranking by meaning has nothing to work with.
+    // Returning nothing until it finishes would be worse than approximate matches.
+    let hits = a
+        .search("shoelase", Some(&vector(1.0, 0.0, 0.0)), 5)
+        .unwrap();
+    assert_eq!(hits.len(), 1, "the fallback must still answer");
+    assert_eq!(hits[0].body, "the shoelace snapped");
 }
 
 // ── addressing ──────────────────────────────────────────────────────────────
