@@ -16,7 +16,7 @@ env:
 jobs:
   check:
     name: test and lint
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -24,8 +24,6 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      # Blacksmith serves actions/cache from a colocated store, so this needs no
-      # replacement action.
       - uses: actions/cache@v4
         with:
           path: |
@@ -47,7 +45,7 @@ jobs:
 
   nix:
     name: nix build and cache
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
