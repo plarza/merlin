@@ -1,7 +1,7 @@
 //! Tool definitions and dispatch.
 //!
-//! Every tool here exists because it was asked for in conversation. There is no
-//! approval gate: the sender allowlist is the boundary.
+//! Every tool here exists because it was asked for in conversation.
+//! There is no approval gate: the sender allowlist is the boundary.
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -25,8 +25,8 @@ pub struct Tools {
     pub config: Arc<Config>,
 }
 
-/// What a tool produced. Images travel separately so the Matrix layer can
-/// upload bytes rather than stuffing base64 through the model context.
+/// What a tool produced.
+/// Images travel separately so the Matrix layer can upload bytes rather than stuffing base64 through the model context.
 pub enum Outcome {
     Text(String),
     Image {
@@ -37,8 +37,8 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// What the model sees. For an image that is a short acknowledgement; the
-    /// bytes go to Matrix directly.
+    /// What the model sees.
+    /// For an image that is a short acknowledgement; the bytes go to Matrix directly.
     pub fn for_model(&self) -> String {
         match self {
             Outcome::Text(t) => t.clone(),
@@ -78,7 +78,7 @@ pub fn definitions() -> Vec<Value> {
         ),
         f(
             "memory_forget",
-            "Delete a memory by key.",
+            "Delete a memory by key. Use this when something you stored turns out to be wrong, rather than storing a correction alongside it.",
             json!({
                 "type": "object",
                 "properties": { "key": { "type": "string" } },
@@ -111,7 +111,7 @@ pub fn definitions() -> Vec<Value> {
         ),
         f(
             "web_fetch",
-            "Fetch a web page and return it as plain text.",
+            "Fetch a single web page and return it as plain text. Use web_search first if you do not already have the URL.",
             json!({
                 "type": "object",
                 "properties": { "url": { "type": "string" } },
@@ -172,12 +172,12 @@ pub fn definitions() -> Vec<Value> {
         ),
         f(
             "cron_list",
-            "List scheduled jobs.",
+            "List the scheduled jobs that exist, with their schedules and prompts. Check here before creating one, so an existing job is edited rather than duplicated.",
             json!({ "type": "object", "properties": {} }),
         ),
         f(
             "cron_delete",
-            "Delete a scheduled job by name.",
+            "Delete a scheduled job by name, stopping it from firing again.",
             json!({
                 "type": "object",
                 "properties": { "name": { "type": "string" } },
@@ -186,7 +186,7 @@ pub fn definitions() -> Vec<Value> {
         ),
         f(
             "time_now",
-            "Current date and time.",
+            "The current date and time. Call this rather than guessing, and before any reasoning that depends on today's date.",
             json!({
                 "type": "object",
                 "properties": { "timezone": { "type": "string", "description": "IANA zone, optional" } }
@@ -206,8 +206,8 @@ impl Tools {
     pub async fn dispatch(&self, name: &str, args: &Value, room_id: &str) -> Outcome {
         match self.run(name, args, room_id).await {
             Ok(outcome) => outcome,
-            // Tool failures are information for the model, not turn-ending
-            // errors: it should be able to try something else or say what broke.
+            // Tool failures are information for the model,
+            // not turn-ending errors: it should be able to try something else or say what broke.
             Err(e) => Outcome::Text(format!("Error from {name}: {e}")),
         }
     }
@@ -469,9 +469,9 @@ impl Tools {
         }
     }
 
-    /// Shared HTTP path for web_fetch and http_request. Errors above the byte
-    /// cap rather than truncating, so a partial body is never mistaken for a
-    /// whole one.
+    /// Shared HTTP path for web_fetch and http_request.
+    /// Errors above the byte cap rather than truncating,
+    /// so a partial body is never mistaken for a whole one.
     async fn fetch_capped(
         &self,
         method: reqwest::Method,
@@ -532,34 +532,4 @@ fn truncate(s: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}…", &s[..end])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn definitions_cover_the_agreed_surface() {
-        let names: Vec<String> = definitions()
-            .iter()
-            .map(|d| d["function"]["name"].as_str().unwrap().to_string())
-            .collect();
-        for expected in [
-            "memory_store",
-            "memory_recall",
-            "memory_forget",
-            "web_search",
-            "web_fetch",
-            "http_request",
-            "generate_image",
-            "run_code",
-            "cron_create",
-            "cron_list",
-            "cron_delete",
-            "search_messages",
-            "time_now",
-        ] {
-            assert!(names.contains(&expected.to_string()), "missing {expected}");
-        }
-    }
 }

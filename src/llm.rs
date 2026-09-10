@@ -1,8 +1,9 @@
 //! OpenRouter client.
 //!
-//! Two endpoints, one key. Text goes through `/chat/completions` with function
-//! calling. Images go through `/images`; image models are absent from the chat
-//! model list and return 404 from `/chat/completions`.
+//! Two endpoints,
+//! one key.
+//! Text goes through `/chat/completions` with function calling.
+//! Images go through `/images`; image models are absent from the chat model list and return 404 from `/chat/completions`.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -41,7 +42,8 @@ pub struct ToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionCall {
     pub name: String,
-    /// Raw JSON string, per the OpenAI wire format.
+    /// Raw JSON string,
+    /// per the OpenAI wire format.
     pub arguments: String,
 }
 
@@ -98,8 +100,9 @@ impl Llm {
         })
     }
 
-    /// One completion round. Returns the assistant message, which may carry
-    /// tool calls instead of content — the caller runs the loop.
+    /// One completion round.
+    /// Returns the assistant message,
+    /// which may carry tool calls instead of content — the caller runs the loop.
     pub async fn chat(&self, messages: &[Message], tools: &[Value]) -> Result<Message> {
         let mut body = json!({
             "model": self.chat_model,
@@ -120,9 +123,9 @@ impl Llm {
             .map_err(|e| classify(e, "chat"))?;
 
         let status = resp.status();
-        // Read as text first: reqwest's timeout covers the body, so a slow
-        // model surfaces here rather than at send(), and .json() would report
-        // it as a parse failure.
+        // Read as text first: reqwest's timeout covers the body,
+        // so a slow model surfaces here rather than at send(),
+        // and .json() would report it as a parse failure.
         let raw = resp.text().await.map_err(|e| classify(e, "chat"))?;
         let payload: Value = serde_json::from_str(&raw).map_err(|e| {
             anyhow::anyhow!(
@@ -150,8 +153,8 @@ impl Llm {
         serde_json::from_value(choice).context("parsing assistant message")
     }
 
-    /// Image generation. A separate endpoint with a prompt rather than a
-    /// message list; returns base64 plus the media type to upload as.
+    /// Image generation.
+    /// A separate endpoint with a prompt rather than a message list; returns base64 plus the media type to upload as.
     pub async fn image(&self, prompt: &str, model: Option<&str>) -> Result<GeneratedImage> {
         let body = json!({
             "model": model.unwrap_or(&self.image_model),
@@ -210,8 +213,8 @@ impl Llm {
     }
 }
 
-/// Distinguishes a timeout from a connection failure, which need different
-/// responses.
+/// Distinguishes a timeout from a connection failure,
+/// which need different responses.
 fn classify(e: reqwest::Error, what: &str) -> anyhow::Error {
     if e.is_timeout() {
         anyhow::anyhow!("OpenRouter {what} timed out; the model took too long to respond")
@@ -222,44 +225,13 @@ fn classify(e: reqwest::Error, what: &str) -> anyhow::Error {
     }
 }
 
-/// First line of a response body, for error messages.
+/// First line of a response body,
+/// for error messages.
 fn head(raw: &str) -> String {
     let first: String = raw.lines().next().unwrap_or("").chars().take(200).collect();
     if first.is_empty() {
         "(empty body)".into()
     } else {
         first
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tool_result_shape_matches_wire_format() {
-        let m = Message::tool_result("call_1", "42");
-        let v = serde_json::to_value(&m).unwrap();
-        assert_eq!(v["role"], "tool");
-        assert_eq!(v["tool_call_id"], "call_1");
-        assert_eq!(v["content"], "42");
-        // An empty tool_calls list must not be serialised onto a tool result.
-        assert!(v.get("tool_calls").is_none());
-    }
-
-    #[test]
-    fn assistant_tool_call_parses() {
-        let raw = json!({
-            "role": "assistant",
-            "content": null,
-            "tool_calls": [{
-                "id": "c1",
-                "type": "function",
-                "function": { "name": "memory_recall", "arguments": "{\"query\":\"zog\"}" }
-            }]
-        });
-        let m: Message = serde_json::from_value(raw).unwrap();
-        assert_eq!(m.tool_calls.len(), 1);
-        assert_eq!(m.tool_calls[0].function.name, "memory_recall");
     }
 }

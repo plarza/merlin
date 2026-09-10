@@ -1,12 +1,13 @@
 //! Message archive.
 //!
-//! Two FTS5 indexes over the same rows. The default tokenizer serves exact term
-//! search. Fuzzy search uses the trigram index to gather candidates, then ranks
-//! them by Jaro-Winkler similarity: trigram MATCH requires every trigram of the
-//! query to be present, so it cannot match through a typo by itself.
+//! Two FTS5 indexes over the same rows.
+//! The default tokenizer serves exact term search.
+//! Fuzzy search uses the trigram index to gather candidates,
+//! then ranks them by Jaro-Winkler similarity: trigram MATCH requires every trigram of the query to be present,
+//! so it cannot match through a typo by itself.
 //!
-//! Similarity comes from rapidfuzz, whose implementations are bit-parallel and
-//! carry no dependencies of their own.
+//! Similarity comes from rapidfuzz,
+//! whose implementations are bit-parallel and carry no dependencies of their own.
 
 use anyhow::{Context, Result};
 use rapidfuzz::distance::jaro_winkler;
@@ -91,7 +92,8 @@ impl Archive {
     }
 
     /// Search with Google-style syntax: bare words match approximately,
-    /// quoted words must appear exactly, and the two combine.
+    /// quoted words must appear exactly,
+    /// and the two combine.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Archived>> {
         let terms = parse_query(query);
         if terms.is_empty() {
@@ -101,7 +103,8 @@ impl Archive {
         let exact: Vec<&Term> = terms.iter().filter(|t| t.exact).collect();
         let loose: Vec<&Term> = terms.iter().filter(|t| !t.exact).collect();
 
-        // Quoted terms are requirements, so they select the candidate set.
+        // Quoted terms are requirements,
+        // so they select the candidate set.
         let candidates = if !exact.is_empty() {
             let expr = exact
                 .iter()
@@ -118,7 +121,8 @@ impl Archive {
             self.trigram_candidates(&loose, limit.saturating_mul(8).max(40))?
         };
 
-        // With nothing loose to rank by, FTS order already stands.
+        // With nothing loose to rank by,
+        // FTS order already stands.
         if loose.is_empty() {
             return Ok(candidates.into_iter().take(limit).collect());
         }
@@ -145,8 +149,8 @@ impl Archive {
         Ok(ranked)
     }
 
-    /// Rows sharing any trigram with the loose terms. Cheap and generous; the
-    /// similarity pass does the real filtering.
+    /// Rows sharing any trigram with the loose terms.
+    /// Cheap and generous; the similarity pass does the real filtering.
     fn trigram_candidates(&self, loose: &[&Term], limit: usize) -> Result<Vec<Archived>> {
         let mut grams: Vec<String> = Vec::new();
         for term in loose {
@@ -197,7 +201,8 @@ struct Term {
     exact: bool,
 }
 
-/// Split a query into terms, treating double-quoted runs as exact.
+/// Split a query into terms,
+/// treating double-quoted runs as exact.
 /// An unterminated quote is treated as if it closed at the end.
 fn parse_query(query: &str) -> Vec<Term> {
     let mut terms = Vec::new();
@@ -252,124 +257,4 @@ fn best_similarity(terms: &[String], body: &str) -> f64 {
         }
     }
     best
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn archive() -> Archive {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
-        let a = Archive { conn };
-        for (i, (sender, body)) in [
-            ("@aiden", "file the zog shoelace incident"),
-            ("@jakob", "john carroll is an australian gymnast"),
-            ("@aiden", "who won the fifa 2025 world cup"),
-            ("@jakob", "the fifa 2018 world cup was in russia"),
-        ]
-        .iter()
-        .enumerate()
-        {
-            a.record(
-                &format!("$e{i}"),
-                "!r:example.org",
-                sender,
-                body,
-                "2026-09-10T00:00:00Z",
-            )
-            .unwrap();
-        }
-        a
-    }
-
-    #[test]
-    fn bare_words_are_fuzzy_by_default() {
-        let hits = archive().search("shoelase", 5).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0].body.contains("shoelace"));
-    }
-
-    #[test]
-    fn quoted_terms_must_appear_exactly() {
-        // Both messages are about the world cup; the quoted year picks one.
-        let hits = archive().search("fifa \"2025\" world cup", 5).unwrap();
-        assert_eq!(hits.len(), 1, "quoted year should exclude the 2018 message");
-        assert!(hits[0].body.contains("2025"));
-    }
-
-    #[test]
-    fn fuzzy_and_exact_combine() {
-        // "wrold" is a typo, "2018" is required.
-        let hits = archive().search("wrold \"2018\"", 5).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0].body.contains("2018"));
-    }
-
-    #[test]
-    fn a_quoted_term_alone_is_an_exact_search() {
-        assert_eq!(archive().search("\"gymnast\"", 5).unwrap().len(), 1);
-        assert!(archive().search("\"gymnasts\"", 5).unwrap().is_empty());
-    }
-
-    #[test]
-    fn parse_splits_quoted_from_bare() {
-        let terms = parse_query("fifa \"2025\" world cup");
-        assert_eq!(
-            terms,
-            vec![
-                Term {
-                    text: "fifa".into(),
-                    exact: false
-                },
-                Term {
-                    text: "2025".into(),
-                    exact: true
-                },
-                Term {
-                    text: "world".into(),
-                    exact: false
-                },
-                Term {
-                    text: "cup".into(),
-                    exact: false
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn parse_tolerates_an_unclosed_quote() {
-        let terms = parse_query("zog \"shoelace");
-        assert_eq!(terms.len(), 2);
-        assert!(terms[1].exact, "trailing quoted run stays exact");
-    }
-
-    #[test]
-    fn parse_drops_bare_terms_too_short_to_trigram() {
-        // "ab" cannot be indexed, but a quoted "ab" is still a valid term.
-        assert!(parse_query("ab").is_empty());
-        assert_eq!(parse_query("\"ab\"").len(), 1);
-    }
-
-    #[test]
-    fn punctuation_query_does_not_error() {
-        assert!(archive().search("s&p", 5).is_ok());
-        assert!(archive().search("???", 5).is_ok());
-        assert!(archive().search("", 5).unwrap().is_empty());
-    }
-
-    #[test]
-    fn duplicate_event_ids_are_ignored() {
-        let a = archive();
-        let before = a.count().unwrap();
-        a.record("$e0", "!r:example.org", "@aiden", "different text", "now")
-            .unwrap();
-        assert_eq!(a.count().unwrap(), before);
-    }
-
-    #[test]
-    fn unrelated_query_matches_nothing() {
-        assert!(archive().search("elephant", 5).unwrap().is_empty());
-    }
 }

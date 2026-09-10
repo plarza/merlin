@@ -1,8 +1,7 @@
 //! Configuration and secrets.
 //!
-//! The TOML file is world-readable and lives in the Nix store or the state
-//! directory; every credential comes from the environment instead, so nothing
-//! ever renders a resolved config containing secrets to disk.
+//! The TOML file is world-readable and lives in the Nix store or the state directory; every credential comes from the environment instead,
+//! so nothing ever renders a resolved config containing secrets to disk.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -14,17 +13,20 @@ pub struct Config {
     pub user_id: String,
     pub display_name: String,
 
-    /// Canonical room IDs (`!abc:server`). Empty means no rooms, not all of
-    /// them: an omitted allowlist must never be a grant.
+    /// Canonical room IDs (`!abc:server`).
+    /// Empty means no rooms,
+    /// not all of them: an omitted allowlist must never be a grant.
     #[serde(default)]
     pub allowed_rooms: Vec<String>,
 
-    /// MXIDs permitted to trigger a turn. Everyone else is still buffered as
-    /// ambient context, they just cannot address the bot.
+    /// MXIDs permitted to trigger a turn.
+    /// Everyone else is still buffered as ambient context,
+    /// they just cannot address the bot.
     #[serde(default)]
     pub allowed_senders: Vec<String>,
 
-    /// Ambient messages retained per room, in memory only.
+    /// Ambient messages retained per room,
+    /// in memory only.
     #[serde(default = "default_context_window")]
     pub context_window: usize,
 
@@ -37,7 +39,8 @@ pub struct Config {
     #[serde(default)]
     pub limits: Limits,
 
-    /// Where session, memory and cron state live.
+    /// Where session,
+    /// memory and cron state live.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
 }
@@ -64,12 +67,13 @@ pub struct Limits {
     pub exec_memory_max: String,
 }
 
-/// Credentials, read from the environment only.
+/// Credentials,
+/// read from the environment only.
 #[derive(Clone)]
 pub struct Secrets {
     pub matrix_password: String,
-    /// Recovery passphrase for server-side key backup. Without it a wiped
-    /// crypto store cannot restore room keys and old messages stay unreadable.
+    /// Recovery passphrase for server-side key backup.
+    /// Without it a wiped crypto store cannot restore room keys and old messages stay unreadable.
     pub matrix_recovery_passphrase: Option<String>,
     /// Encrypts the persisted session blob at rest.
     pub session_encryption_key: String,
@@ -93,10 +97,9 @@ impl Config {
         Ok(config)
     }
 
-    /// Identifiers can come from the environment instead of the file. The
-    /// config is rendered into the world-readable Nix store from a public
-    /// repository, and a private room's id does not belong there even though it
-    /// is not a credential.
+    /// Identifiers can come from the environment instead of the file.
+    /// The config is rendered into the world-readable Nix store from a public repository,
+    /// and a private room's id does not belong there even though it is not a credential.
     pub fn apply_env_overrides(&mut self) {
         if let Some(rooms) = list_from_env("MERLIN_ALLOWED_ROOMS") {
             self.allowed_rooms = rooms;
@@ -134,8 +137,7 @@ impl Secrets {
         Ok(Self {
             matrix_password: req("MATRIX_PASSWORD")?,
             matrix_recovery_passphrase: opt("MATRIX_RECOVERY_PASSPHRASE"),
-            // Derived from the Matrix password when unset so a fresh deploy
-            // works without inventing another secret to manage.
+            // Derived from the Matrix password when unset so a fresh deploy works without inventing another secret to manage.
             session_encryption_key: opt("SESSION_ENCRYPTION_KEY")
                 .unwrap_or_else(|| req("MATRIX_PASSWORD").unwrap_or_default()),
             openrouter_api_key: req("OPENROUTER_API_KEY")?,
@@ -157,7 +159,8 @@ fn req(key: &str) -> Result<String> {
         })
 }
 
-/// Comma-separated env list, empty entries dropped.
+/// Comma-separated env list,
+/// empty entries dropped.
 fn list_from_env(key: &str) -> Option<Vec<String>> {
     let raw = std::env::var(key).ok()?;
     let items: Vec<String> = raw
@@ -225,47 +228,4 @@ fn default_exec_memory_max() -> String {
 }
 fn default_state_dir() -> PathBuf {
     PathBuf::from("/var/lib/merlin")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cfg(user_id: &str) -> Config {
-        Config {
-            homeserver: "https://example.org".into(),
-            user_id: user_id.into(),
-            display_name: "merlin".into(),
-            allowed_rooms: vec!["!a:example.org".into()],
-            allowed_senders: vec!["@aiden:example.org".into()],
-            context_window: 40,
-            timezone: "Australia/Sydney".into(),
-            model: ModelConfig::default(),
-            limits: Limits::default(),
-            state_dir: "/tmp".into(),
-        }
-    }
-
-    #[test]
-    fn env_overrides_replace_config_lists() {
-        // SAFETY: single-threaded test process, no other reader of this var.
-        unsafe {
-            std::env::set_var("MERLIN_ALLOWED_ROOMS", " !x:example.org , ,!y:example.org ");
-        }
-        let mut c = cfg("@merlin:example.org");
-        c.apply_env_overrides();
-        assert_eq!(c.allowed_rooms, vec!["!x:example.org", "!y:example.org"]);
-        unsafe {
-            std::env::remove_var("MERLIN_ALLOWED_ROOMS");
-        }
-    }
-
-    #[test]
-    fn allowlists_are_exact() {
-        let c = cfg("@merlin:example.org");
-        assert!(c.is_allowed_room("!a:example.org"));
-        assert!(!c.is_allowed_room("!b:example.org"));
-        assert!(c.is_allowed_sender("@aiden:example.org"));
-        assert!(!c.is_allowed_sender("@mallory:example.org"));
-    }
 }

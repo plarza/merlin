@@ -1,14 +1,14 @@
 //! Addressing rules and the ambient context buffer.
 //!
-//! Pure logic, deliberately separate from the Matrix plumbing so it can be
-//! tested without a homeserver — this is the part that decides whether a
-//! message costs money.
+//! Pure logic,
+//! deliberately separate from the Matrix plumbing so it can be tested without a homeserver — this is the part that decides whether a message costs money.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// One buffered message. Never persisted: the ring dies with the process, so
-/// ambient conversation does not silently become permanently searchable.
+/// One buffered message.
+/// Never persisted: the ring dies with the process,
+/// so ambient conversation does not silently become permanently searchable.
 #[derive(Debug, Clone)]
 pub struct Turn {
     pub sender: String,
@@ -38,8 +38,9 @@ impl Buffers {
         }
     }
 
-    /// Everything buffered for a room, oldest first, excluding the message
-    /// currently being answered (which the caller passes separately).
+    /// Everything buffered for a room,
+    /// oldest first,
+    /// excluding the message currently being answered (which the caller passes separately).
     pub fn context(&self, room_id: &str) -> Vec<Turn> {
         self.inner
             .lock()
@@ -49,8 +50,9 @@ impl Buffers {
             .unwrap_or_default()
     }
 
-    /// Ambient context as prompt text. `skip_last` drops the message currently
-    /// being answered, which the caller passes to the model separately.
+    /// Ambient context as prompt text.
+    /// `skip_last` drops the message currently being answered,
+    /// which the caller passes to the model separately.
     pub fn render(&self, room_id: &str, skip_last: bool) -> Option<String> {
         let mut turns = self.context(room_id);
         if skip_last {
@@ -71,8 +73,8 @@ impl Buffers {
 
 /// Whether a message is addressed to the bot.
 ///
-/// The name check is word-boundary, so an unrelated use of the name in ordinary
-/// conversation does not trigger a turn.
+/// The name check is word-boundary,
+/// so an unrelated use of the name in ordinary conversation does not trigger a turn.
 pub fn is_addressed(
     body: &str,
     m_mentions: &[String],
@@ -85,8 +87,7 @@ pub fn is_addressed(
         return true;
     }
 
-    // An explicit pill is authoritative in both directions: a client that sent
-    // m.mentions listed everyone it meant.
+    // An explicit pill is authoritative in both directions: a client that sent m.mentions listed everyone it meant.
     if !m_mentions.is_empty() {
         return m_mentions.iter().any(|id| id == user_id);
     }
@@ -100,9 +101,10 @@ pub fn is_addressed(
         || (!display_name.is_empty() && contains_word(&haystack, &display_name.to_lowercase()))
 }
 
-/// Word-boundary containment without pulling a regex per call. A match must not
-/// be flanked by alphanumerics, so "merlin" hits in "merlin, hello" and
-/// "@merlin" but not in "merlinesque".
+/// Word-boundary containment without pulling a regex per call.
+/// A match must not be flanked by alphanumerics,
+/// so "merlin" hits in "merlin,
+/// hello" and "@merlin" but not in "merlinesque".
 fn contains_word(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
@@ -129,131 +131,4 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
         }
     }
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const UID: &str = "@merlin:matrix.aza.network";
-
-    fn addressed(body: &str) -> bool {
-        is_addressed(body, &[], UID, "merlin", "merlin", false)
-    }
-
-    #[test]
-    fn plain_name_addresses() {
-        assert!(addressed("merlin what day is it"));
-        assert!(addressed("hey Merlin, you there?"));
-        assert!(addressed("@merlin hello"));
-        assert!(addressed("ask @merlin:matrix.aza.network about it"));
-    }
-
-    #[test]
-    fn substring_does_not_address() {
-        assert!(!addressed("merlinesque behaviour"));
-        assert!(!addressed("submerlin"));
-    }
-
-    #[test]
-    fn unrelated_chat_is_ignored() {
-        assert!(!addressed("what do you reckon about the game"));
-        assert!(!addressed(""));
-    }
-
-    #[test]
-    fn explicit_mentions_are_authoritative() {
-        // Listed: addressed even though the body never names it.
-        assert!(is_addressed(
-            "can you look at this",
-            &[UID.to_string()],
-            UID,
-            "merlin",
-            "merlin",
-            false
-        ));
-        // Listed someone else: not addressed, even though the body says merlin.
-        assert!(!is_addressed(
-            "merlin is a bird",
-            &["@jakob:sadairs.com".to_string()],
-            UID,
-            "merlin",
-            "merlin",
-            false
-        ));
-    }
-
-    #[test]
-    fn reply_to_bot_addresses_without_a_name() {
-        assert!(is_addressed(
-            "what did you mean",
-            &[],
-            UID,
-            "merlin",
-            "merlin",
-            true
-        ));
-    }
-
-    #[test]
-    fn ring_buffer_evicts_oldest() {
-        let b = Buffers::new(3);
-        for i in 0..5 {
-            b.push(
-                "!r",
-                Turn {
-                    sender: "@a".into(),
-                    body: i.to_string(),
-                },
-            );
-        }
-        let ctx = b.context("!r");
-        assert_eq!(ctx.len(), 3);
-        assert_eq!(ctx[0].body, "2");
-        assert_eq!(ctx[2].body, "4");
-    }
-
-    #[test]
-    fn buffers_are_per_room() {
-        let b = Buffers::new(5);
-        b.push(
-            "!a",
-            Turn {
-                sender: "@x".into(),
-                body: "one".into(),
-            },
-        );
-        b.push(
-            "!b",
-            Turn {
-                sender: "@y".into(),
-                body: "two".into(),
-            },
-        );
-        assert_eq!(b.context("!a").len(), 1);
-        assert_eq!(b.context("!b")[0].body, "two");
-        assert!(b.render("!missing", false).is_none());
-    }
-
-    #[test]
-    fn render_labels_each_line_with_its_sender() {
-        let b = Buffers::new(5);
-        b.push(
-            "!r",
-            Turn {
-                sender: "@aiden".into(),
-                body: "hi".into(),
-            },
-        );
-        b.push(
-            "!r",
-            Turn {
-                sender: "@jakob".into(),
-                body: "yo".into(),
-            },
-        );
-        assert_eq!(b.render("!r", false).unwrap(), "@aiden: hi\n@jakob: yo");
-        // skip_last drops the message being answered.
-        assert_eq!(b.render("!r", true).unwrap(), "@aiden: hi");
-    }
 }

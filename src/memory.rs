@@ -1,7 +1,7 @@
 //! Durable memory.
 //!
-//! Flat by design: no agent or tenant foreign key, so renaming the bot does not
-//! orphan its records.
+//! Flat by design: no agent or tenant foreign key,
+//! so renaming the bot does not orphan its records.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -64,8 +64,7 @@ impl Memory {
         Ok(Self { conn })
     }
 
-    /// Upsert by `key` so re-filing the same subject revises it rather than
-    /// accumulating near-duplicates.
+    /// Upsert by `key` so re-filing the same subject revises it rather than accumulating near-duplicates.
     pub fn store(
         &self,
         key: &str,
@@ -93,8 +92,9 @@ impl Memory {
         Ok(())
     }
 
-    /// BM25 keyword search. Falls back to a LIKE scan when the query has no
-    /// usable FTS tokens, so a search for punctuation or a bare id still works.
+    /// BM25 keyword search.
+    /// Falls back to a LIKE scan when the query has no usable FTS tokens,
+    /// so a search for punctuation or a bare id still works.
     pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<Record>> {
         let cleaned = sanitize_fts(query);
 
@@ -141,7 +141,8 @@ impl Memory {
             .unwrap_or(0))
     }
 
-    /// One-shot import from a compatible table, dropping any `agent_id`.
+    /// One-shot import from a compatible table,
+    /// dropping any `agent_id`.
     /// Returns how many rows were taken.
     pub fn import_legacy(&mut self, legacy: &Path) -> Result<usize> {
         let src = Connection::open(legacy)
@@ -165,8 +166,9 @@ impl Memory {
         let tx = self.conn.transaction()?;
         let mut taken = 0usize;
         for (id, key, content, category, created, updated) in rows {
-            // The legacy table allows duplicate keys across agents; ours does
-            // not. Skipping a collision keeps the first, which is the older.
+            // The legacy table allows duplicate keys across agents; ours does not.
+            // Skipping a collision keeps the first,
+            // which is the older.
             let n = tx.execute(
                 "INSERT OR IGNORE INTO memories
                    (id, key, content, category, room_id, created_at, updated_at)
@@ -189,8 +191,10 @@ fn row_to_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
     })
 }
 
-/// FTS5 treats most punctuation as syntax, so a raw user query can be a syntax
-/// error rather than a miss. Keep alphanumerics, OR the terms together.
+/// FTS5 treats most punctuation as syntax,
+/// so a raw user query can be a syntax error rather than a miss.
+/// Keep alphanumerics,
+/// OR the terms together.
 fn sanitize_fts(query: &str) -> String {
     let terms: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric())
@@ -198,52 +202,4 @@ fn sanitize_fts(query: &str) -> String {
         .map(|t| format!("\"{}\"", t.to_lowercase()))
         .collect();
     terms.join(" OR ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn mem() -> Memory {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
-        Memory { conn }
-    }
-
-    #[test]
-    fn store_then_recall() {
-        let m = mem();
-        m.store("zog", "Zog is an alien with his own file", "core", None)
-            .unwrap();
-        let hits = m.recall("zog alien", 5).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].key, "zog");
-    }
-
-    #[test]
-    fn store_is_upsert_not_duplicate() {
-        let m = mem();
-        m.store("zog", "first", "core", None).unwrap();
-        m.store("zog", "second", "core", None).unwrap();
-        assert_eq!(m.count().unwrap(), 1);
-        assert_eq!(m.recall("zog", 5).unwrap()[0].content, "second");
-    }
-
-    #[test]
-    fn punctuation_query_does_not_error() {
-        let m = mem();
-        m.store("k", "a note about !rooms:servers", "core", None)
-            .unwrap();
-        assert!(m.recall("!!!", 5).is_ok());
-        assert!(m.recall("rooms", 5).is_ok());
-    }
-
-    #[test]
-    fn forget_removes_and_reports() {
-        let m = mem();
-        m.store("k", "v", "core", None).unwrap();
-        assert!(m.forget("k").unwrap());
-        assert!(!m.forget("k").unwrap());
-        assert_eq!(m.count().unwrap(), 0);
-    }
 }

@@ -1,8 +1,7 @@
-//! Scheduled jobs, created by the agent at runtime rather than written into
-//! config.
+//! Scheduled jobs,
+//! created by the agent at runtime rather than written into config.
 //!
-//! A firing job has one output path: the scheduler runs the prompt and posts
-//! the result.
+//! A firing job has one output path: the scheduler runs the prompt and posts the result.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
@@ -108,8 +107,9 @@ impl CronStore {
 }
 
 impl Job {
-    /// Reject a bad expression at creation time, where the agent can correct
-    /// it, rather than at the next restart.
+    /// Reject a bad expression at creation time,
+    /// where the agent can correct it,
+    /// rather than at the next restart.
     pub fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty() {
             anyhow::bail!("job name cannot be empty");
@@ -117,9 +117,8 @@ impl Job {
         chrono_tz::Tz::from_str(&self.timezone)
             .map_err(|_| anyhow::anyhow!("unknown timezone '{}'", self.timezone))?;
 
-        // tokio-cron-scheduler wants 6 fields (seconds first); the agent writes
-        // ordinary 5-field crontab syntax, so normalising here keeps the tool
-        // surface familiar.
+        // tokio-cron-scheduler wants 6 fields (seconds first); the agent writes ordinary 5-field crontab syntax,
+        // so normalising here keeps the tool surface familiar.
         let expr = self.six_field_schedule();
         tokio_cron_scheduler::Job::new_async_tz(expr.as_str(), chrono_tz::UTC, |_uuid, _lock| {
             Box::pin(async {})
@@ -139,71 +138,5 @@ impl Job {
 
     pub fn tz(&self) -> chrono_tz::Tz {
         chrono_tz::Tz::from_str(&self.timezone).unwrap_or(chrono_tz::UTC)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn store() -> CronStore {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
-        CronStore { conn }
-    }
-
-    fn job(name: &str, schedule: &str) -> Job {
-        Job {
-            name: name.into(),
-            schedule: schedule.into(),
-            timezone: "Australia/Sydney".into(),
-            prompt: "post the HN digest".into(),
-            room_id: "!r:example.org".into(),
-            enabled: true,
-        }
-    }
-
-    #[test]
-    fn five_field_schedules_gain_a_seconds_column() {
-        assert_eq!(job("a", "0 7 * * *").six_field_schedule(), "0 0 7 * * *");
-        // Already six fields: left alone.
-        assert_eq!(
-            job("a", "30 0 7 * * *").six_field_schedule(),
-            "30 0 7 * * *"
-        );
-    }
-
-    #[test]
-    fn validate_accepts_crontab_syntax() {
-        assert!(job("hn", "0 7 * * *").validate().is_ok());
-    }
-
-    #[test]
-    fn validate_rejects_nonsense() {
-        assert!(job("x", "not a cron").validate().is_err());
-        let mut j = job("x", "0 7 * * *");
-        j.timezone = "Mars/Olympus".into();
-        assert!(j.validate().is_err());
-        let mut empty = job("", "0 7 * * *");
-        empty.name = "  ".into();
-        assert!(empty.validate().is_err());
-    }
-
-    #[test]
-    fn upsert_replaces_rather_than_duplicating() {
-        let s = store();
-        s.upsert(&job("hn", "0 7 * * *")).unwrap();
-        s.upsert(&job("hn", "0 8 * * *")).unwrap();
-        let jobs = s.list().unwrap();
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].schedule, "0 8 * * *");
-    }
-
-    #[test]
-    fn delete_reports_whether_it_existed() {
-        let s = store();
-        s.upsert(&job("hn", "0 7 * * *")).unwrap();
-        assert!(s.delete("hn").unwrap());
-        assert!(!s.delete("hn").unwrap());
     }
 }

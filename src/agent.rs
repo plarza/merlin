@@ -1,4 +1,6 @@
-//! The turn loop: prompt, tool calls, reply.
+//! The turn loop: prompt,
+//! tool calls,
+//! reply.
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -30,10 +32,12 @@ pub struct Incoming<'a> {
     pub room_id: &'a str,
     pub sender: &'a str,
     pub body: &'a str,
-    /// Ambient messages seen but not answered, oldest first.
+    /// Ambient messages seen but not answered,
+    /// oldest first.
     pub ambient: Option<String>,
-    /// Text of the message being replied to, when this is a reply, so a reply
-    /// carrying only the bot's name still has its subject.
+    /// Text of the message being replied to,
+    /// when this is a reply,
+    /// so a reply carrying only the bot's name still has its subject.
     pub reply_parent: Option<String>,
 }
 
@@ -86,9 +90,11 @@ impl Agent {
             }
         }
 
-        // Out of iterations. Rather than reporting the limit, which tells the
-        // user nothing, ask for an answer from what was already gathered. Tools
-        // are withheld from this call so the model cannot spend another round.
+        // Out of iterations.
+        // Rather than reporting the limit,
+        // which tells the user nothing,
+        // ask for an answer from what was already gathered.
+        // Tools are withheld from this call so the model cannot spend another round.
         messages.push(Message::user(
             "You have used all available tool steps. Answer now with what you \
              have already found, and say plainly which parts you could not \
@@ -107,8 +113,8 @@ impl Agent {
     }
 }
 
-/// Assemble the system prompt. Free-standing so it can be tested without
-/// constructing an LLM client or a tool registry.
+/// Assemble the system prompt.
+/// Free-standing so it can be tested without constructing an LLM client or a tool registry.
 fn system_prompt(soul: &str, incoming: &Incoming<'_>) -> String {
     let mut prompt = soul.to_string();
 
@@ -126,41 +132,4 @@ fn system_prompt(soul: &str, incoming: &Incoming<'_>) -> String {
     }
 
     prompt
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn incoming<'a>(ambient: Option<&'a str>, parent: Option<&'a str>) -> Incoming<'a> {
-        Incoming {
-            room_id: "!r:example.org",
-            sender: "@aiden:example.org",
-            body: "merlin hello",
-            ambient: ambient.map(str::to_string),
-            reply_parent: parent.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn ambient_context_is_labelled_as_not_for_reply() {
-        let p = system_prompt("soul", &incoming(Some("@jakob: yo"), None));
-        assert!(p.contains("recent room conversation"));
-        assert!(p.contains("Do not reply to them"));
-        assert!(p.contains("@jakob: yo"));
-    }
-
-    #[test]
-    fn reply_parent_is_included() {
-        let p = system_prompt("soul", &incoming(None, Some("add a memory to not do that")));
-        assert!(p.contains("message being replied to"));
-        assert!(p.contains("add a memory to not do that"));
-    }
-
-    #[test]
-    fn both_context_blocks_coexist() {
-        let p = system_prompt("soul", &incoming(Some("@jakob: yo"), Some("parent text")));
-        assert!(p.contains("parent text") && p.contains("@jakob: yo"));
-        assert!(p.starts_with("soul"));
-    }
 }

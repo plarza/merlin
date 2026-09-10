@@ -1,8 +1,10 @@
 //! Matrix wiring.
 //!
-//! mxlink owns login, session persistence, key backup and cross-signing. What
-//! is left here is deciding which messages deserve a turn, and sending replies
-//! as plain text.
+//! mxlink owns login,
+//! session persistence,
+//! key backup and cross-signing.
+//! What is left here is deciding which messages deserve a turn,
+//! and sending replies as plain text.
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -38,8 +40,8 @@ pub async fn connect(config: &Config, secrets: &Secrets) -> Result<MatrixLink> {
         secrets.matrix_password.clone(),
     );
 
-    // Without a recovery passphrase a wiped crypto store cannot restore room
-    // keys, and previously readable messages become permanently undecryptable.
+    // Without a recovery passphrase a wiped crypto store cannot restore room keys,
+    // and previously readable messages become permanently undecryptable.
     let encryption = LoginEncryption::new(secrets.matrix_recovery_passphrase.clone(), false);
 
     let login = LoginConfig::new(
@@ -49,8 +51,7 @@ pub async fn connect(config: &Config, secrets: &Secrets) -> Result<MatrixLink> {
         config.display_name.clone(),
     );
 
-    // mxlink wants exactly 32 bytes; derive them from the configured key
-    // material so no separate 64-hex secret has to be provisioned and rotated.
+    // mxlink wants exactly 32 bytes; derive them from the configured key material so no separate 64-hex secret has to be provisioned and rotated.
     let key = {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -105,8 +106,10 @@ impl Bot {
 
         let sender = event.sender.to_string();
 
-        // Buffer first, unconditionally. Ambient context is the point: every
-        // message is retained, and only addressing decides whether a turn runs.
+        // Buffer first,
+        // unconditionally.
+        // Ambient context is the point: every message is retained,
+        // and only addressing decides whether a turn runs.
         self.buffers.push(
             &room_id,
             Turn {
@@ -115,8 +118,8 @@ impl Bot {
             },
         );
 
-        // Archived unconditionally, so history is searchable whether or not
-        // the bot was addressed.
+        // Archived unconditionally,
+        // so history is searchable whether or not the bot was addressed.
         {
             let at = chrono::Utc::now().to_rfc3339();
             let archive = self.archive.lock().unwrap();
@@ -149,15 +152,17 @@ impl Bot {
             return Ok(());
         }
 
-        // Addressed, but by someone who may not drive the bot. Their message
-        // still counts as context, they just cannot start a turn.
+        // Addressed,
+        // but by someone who may not drive the bot.
+        // Their message still counts as context,
+        // they just cannot start a turn.
         if !self.config.is_allowed_sender(&sender) {
             tracing::info!(%sender, "addressed by a sender who is not allowed");
             return Ok(());
         }
 
-        // The buffer already contains this message; the turn passes it
-        // separately, so drop the last entry from the ambient block.
+        // The buffer already contains this message; the turn passes it separately,
+        // so drop the last entry from the ambient block.
         let ambient = self.buffers.render(&room_id, true);
 
         tracing::info!(%sender, chars = body.len(), "turn started");
@@ -211,8 +216,9 @@ impl Bot {
         Ok(())
     }
 
-    /// Resolve a room by id and send plain text. Used by scheduled jobs, which
-    /// have a room id rather than a live Room handle.
+    /// Resolve a room by id and send plain text.
+    /// Used by scheduled jobs,
+    /// which have a room id rather than a live Room handle.
     pub async fn post(&self, room_id: &str, text: &str) -> Result<()> {
         let room = self.resolve_room(room_id)?;
         self.send_text(&room, text).await
@@ -232,7 +238,8 @@ impl Bot {
             .with_context(|| format!("not joined to room {room_id}"))
     }
 
-    /// Sender and body of the message being replied to, when there is one.
+    /// Sender and body of the message being replied to,
+    /// when there is one.
     async fn reply_parent(
         &self,
         room: &Room,
@@ -259,7 +266,8 @@ impl Bot {
         Some((sender, body))
     }
 
-    /// Plain text with no formatted_body, so nothing renders as markdown.
+    /// Plain text with no formatted_body,
+    /// so nothing renders as markdown.
     async fn send_text(&self, room: &Room, text: &str) -> Result<()> {
         let mut content = RoomMessageEventContent::text_plain(text);
         self.link

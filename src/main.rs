@@ -1,32 +1,19 @@
 //! merlin — a Matrix assistant.
 
-mod agent;
-mod backfill;
-mod config;
-mod cron;
-mod exec;
-mod llm;
-mod matrix;
-mod memory;
-mod messages;
-mod room;
-mod scheduler;
-mod tools;
-
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use agent::Agent;
-use config::{Config, Secrets};
-use cron::CronStore;
-use exec::Sandbox;
-use llm::Llm;
-use matrix::Bot;
-use memory::Memory;
-use messages::Archive;
-use room::Buffers;
-use tools::Tools;
+use merlin::agent::Agent;
+use merlin::config::{Config, Secrets};
+use merlin::cron::CronStore;
+use merlin::exec::Sandbox;
+use merlin::llm::Llm;
+use merlin::matrix::Bot;
+use merlin::memory::Memory;
+use merlin::messages::Archive;
+use merlin::room::Buffers;
+use merlin::tools::Tools;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -67,9 +54,9 @@ async fn main() -> Result<()> {
     let config = Arc::new(Config::load(&config_path)?);
     let memory_path = config.state_dir.join("memory.db");
 
-    // Import is a one-shot maintenance mode, not part of startup: it runs
-    // against the same schema the bot uses and then exits, so the result can be
-    // verified before anything goes live.
+    // Import is a one-shot maintenance mode,
+    // not part of startup: it runs against the same schema the bot uses and then exits,
+    // so the result can be verified before anything goes live.
     if let Some(legacy) = import_from {
         let mut memory = Memory::open(&memory_path)?;
         let before = memory.count()?;
@@ -135,7 +122,7 @@ async fn main() -> Result<()> {
         max_iterations: config.limits.tool_iterations,
     });
 
-    let link = matrix::connect(&config, &secrets).await?;
+    let link = merlin::matrix::connect(&config, &secrets).await?;
     tracing::info!(user = %config.user_id, "connected");
 
     if let Some(path) = import_keys {
@@ -155,10 +142,9 @@ async fn main() -> Result<()> {
     }
 
     if let Some(pages) = backfill_pages {
-        // Sync once so the client has joined rooms and whatever keys the
-        // server will hand over before we start reading history.
+        // Sync once so the client has joined rooms and whatever keys the server will hand over before we start reading history.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        let stats = backfill::run(&link, &config, &archive, pages).await?;
+        let stats = merlin::backfill::run(&link, &config, &archive, pages).await?;
         println!("backfill: {stats}");
         if stats.undecryptable > stats.archived {
             println!(
@@ -179,13 +165,14 @@ async fn main() -> Result<()> {
     });
 
     // Started before sync so a job due at boot is not missed.
-    scheduler::start(Arc::clone(&cron_store), agent, Arc::clone(&bot)).await?;
+    merlin::scheduler::start(Arc::clone(&cron_store), agent, Arc::clone(&bot)).await?;
 
     bot.run().await
 }
 
-/// How `run_code` reaches the sandbox. Overridable so the bot can run outside
-/// NixOS, where the production wrapper does not exist.
+/// How `run_code` reaches the sandbox.
+/// Overridable so the bot can run outside NixOS,
+/// where the production wrapper does not exist.
 fn exec_runner() -> Vec<String> {
     match std::env::var("MERLIN_EXEC_RUNNER") {
         Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(str::to_string).collect(),
