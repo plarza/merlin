@@ -87,13 +87,12 @@ pub fn definitions() -> Vec<Value> {
         ),
         f(
             "search_messages",
-            "Search the full history of messages in this chat. Use it to find what someone actually said, as opposed to memory_recall which searches notes you chose to keep. Set fuzzy when you are unsure of the spelling.",
+            "Search the full history of messages in this chat, for what someone actually said. memory_recall searches notes you chose to keep; this searches everything. Bare words match approximately and tolerate misspellings. Put a word in double quotes to require it exactly. The two combine, so 'fifa \"2025\" world cup' finds messages about the world cup that definitely mention 2025.",
             json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string" },
-                    "limit": { "type": "integer", "description": "Default 8" },
-                    "fuzzy": { "type": "boolean", "description": "Tolerate typos and partial words" }
+                    "query": { "type": "string", "description": "Bare words are fuzzy; \"quoted\" words are required exactly" },
+                    "limit": { "type": "integer", "description": "Default 8" }
                 },
                 "required": ["query"]
             }),
@@ -271,10 +270,9 @@ impl Tools {
             "search_messages" => {
                 let query = str_arg(args, "query")?;
                 let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
-                let fuzzy = args.get("fuzzy").and_then(Value::as_bool).unwrap_or(false);
                 let hits = {
                     let a = self.archive.lock().unwrap();
-                    a.search(&query, limit.clamp(1, 30), fuzzy)?
+                    a.search(&query, limit.clamp(1, 30))?
                 };
                 if hits.is_empty() {
                     return Ok(Outcome::Text(format!("No messages matched '{query}'.")));

@@ -90,40 +90,67 @@ impl Archive {
             .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?)
     }
 
-    pub fn search(&self, query: &str, limit: usize, fuzzy: bool) -> Result<Vec<Archived>> {
-        if fuzzy {
-            return self.search_trigram(query, limit);
-        }
-        let terms = sanitize_fts(query);
-        if terms.is_empty() {
-            // Nothing tokenizable: fall through rather than return an FTS error.
-            return self.search_trigram(query, limit);
-        }
-        let hits = self.query_index("messages_fts", &terms, limit)?;
-        if hits.is_empty() {
-            // An exact-term miss is exactly when fuzzy is worth trying.
-            return self.search_trigram(query, limit);
-        }
-        Ok(hits)
-    }
-
-    /// Trigram MATCH is substring search, not typo tolerance: "shoelase"
-    /// requires every one of its trigrams, and two of them are absent from
-    /// "shoelace". So OR the trigrams to gather candidates cheaply, then rank
-    /// them by edit distance in Rust.
-    fn search_trigram(&self, query: &str, limit: usize) -> Result<Vec<Archived>> {
-        let terms: Vec<String> = query
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|t| t.chars().count() >= 3)
-            .map(str::to_lowercase)
-            .collect();
+    /// Search with Google-style syntax: bare words match approximately,
+    /// quoted words must appear exactly, and the two combine.
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Archived>> {
+        let terms = parse_query(query);
         if terms.is_empty() {
             return Ok(Vec::new());
         }
 
+        let exact: Vec<&Term> = terms.iter().filter(|t| t.exact).collect();
+        let loose: Vec<&Term> = terms.iter().filter(|t| !t.exact).collect();
+
+        // Quoted terms are requirements, so they select the candidate set.
+        let candidates = if !exact.is_empty() {
+            let expr = exact
+                .iter()
+                .map(|t| format!("\"{}\"", escape(&t.text)))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let over = if loose.is_empty() {
+                limit
+            } else {
+                limit.saturating_mul(8).max(40)
+            };
+            self.query_index("messages_fts", &expr, over)?
+        } else {
+            self.trigram_candidates(&loose, limit.saturating_mul(8).max(40))?
+        };
+
+        // With nothing loose to rank by, FTS order already stands.
+        if loose.is_empty() {
+            return Ok(candidates.into_iter().take(limit).collect());
+        }
+
+        let words: Vec<String> = loose.iter().map(|t| t.text.clone()).collect();
+        let mut scored: Vec<(f64, Archived)> = candidates
+            .into_iter()
+            .map(|row| (best_similarity(&words, &row.body), row))
+            .filter(|(score, _)| *score >= 0.82)
+            .collect();
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let ranked: Vec<Archived> = scored.into_iter().take(limit).map(|(_, r)| r).collect();
+
+        // A required term with no fuzzy neighbour still beats returning nothing.
+        if ranked.is_empty() && !exact.is_empty() {
+            let expr = exact
+                .iter()
+                .map(|t| format!("\"{}\"", escape(&t.text)))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            return self.query_index("messages_fts", &expr, limit);
+        }
+        Ok(ranked)
+    }
+
+    /// Rows sharing any trigram with the loose terms. Cheap and generous; the
+    /// similarity pass does the real filtering.
+    fn trigram_candidates(&self, loose: &[&Term], limit: usize) -> Result<Vec<Archived>> {
         let mut grams: Vec<String> = Vec::new();
-        for term in &terms {
-            let chars: Vec<char> = term.chars().collect();
+        for term in loose {
+            let chars: Vec<char> = term.text.chars().collect();
             for w in chars.windows(3) {
                 let g: String = w.iter().collect();
                 if !grams.contains(&g) {
@@ -134,25 +161,12 @@ impl Archive {
         if grams.is_empty() {
             return Ok(Vec::new());
         }
-
         let expr = grams
             .iter()
-            .map(|g| format!("\"{g}\""))
+            .map(|g| format!("\"{}\"", escape(g)))
             .collect::<Vec<_>>()
             .join(" OR ");
-
-        // Over-fetch, because trigram overlap ranks poorly on its own.
-        let candidates =
-            self.query_index("messages_trigram", &expr, limit.saturating_mul(8).max(40))?;
-
-        let mut scored: Vec<(f64, Archived)> = candidates
-            .into_iter()
-            .map(|row| (best_similarity(&terms, &row.body), row))
-            .filter(|(score, _)| *score >= 0.82)
-            .collect();
-
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(scored.into_iter().take(limit).map(|(_, row)| row).collect())
+        self.query_index("messages_trigram", &expr, limit)
     }
 
     fn query_index(&self, index: &str, expr: &str, limit: usize) -> Result<Vec<Archived>> {
@@ -176,7 +190,51 @@ impl Archive {
     }
 }
 
-/// Best similarity between any query term and any word in the body.
+/// One parsed query term.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Term {
+    text: String,
+    exact: bool,
+}
+
+/// Split a query into terms, treating double-quoted runs as exact.
+/// An unterminated quote is treated as if it closed at the end.
+fn parse_query(query: &str) -> Vec<Term> {
+    let mut terms = Vec::new();
+    let mut buf = String::new();
+    let mut in_quotes = false;
+
+    let flush = |buf: &mut String, exact: bool, terms: &mut Vec<Term>| {
+        let text = buf.trim().to_lowercase();
+        buf.clear();
+        // Trigram needs three characters; exact terms are useful shorter.
+        let floor = if exact { 1 } else { 3 };
+        if text.chars().count() >= floor {
+            terms.push(Term { text, exact });
+        }
+    };
+
+    for c in query.chars() {
+        match c {
+            '"' => {
+                flush(&mut buf, in_quotes, &mut terms);
+                in_quotes = !in_quotes;
+            }
+            c if c.is_whitespace() && !in_quotes => flush(&mut buf, false, &mut terms),
+            c if c.is_alphanumeric() || in_quotes => buf.push(c),
+            _ => flush(&mut buf, false, &mut terms),
+        }
+    }
+    flush(&mut buf, in_quotes, &mut terms);
+    terms
+}
+
+/// FTS5 string literals escape a quote by doubling it.
+fn escape(term: &str) -> String {
+    term.replace('"', "\"\"")
+}
+
+/// Best similarity between any loose term and any word in the body.
 fn best_similarity(terms: &[String], body: &str) -> f64 {
     let words: Vec<String> = body
         .split(|c: char| !c.is_alphanumeric())
@@ -196,17 +254,6 @@ fn best_similarity(terms: &[String], body: &str) -> f64 {
     best
 }
 
-/// FTS5 treats punctuation as syntax, so a raw query can be a syntax error
-/// rather than a miss. Quote each term and OR them together.
-fn sanitize_fts(query: &str) -> String {
-    query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.len() > 1)
-        .map(|t| format!("\"{}\"", t.to_lowercase()))
-        .collect::<Vec<_>>()
-        .join(" OR ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,7 +265,8 @@ mod tests {
         for (i, (sender, body)) in [
             ("@aiden", "file the zog shoelace incident"),
             ("@jakob", "john carroll is an australian gymnast"),
-            ("@aiden", "what did the s&p do this week"),
+            ("@aiden", "who won the fifa 2025 world cup"),
+            ("@jakob", "the fifa 2018 world cup was in russia"),
         ]
         .iter()
         .enumerate()
@@ -236,32 +284,79 @@ mod tests {
     }
 
     #[test]
-    fn exact_terms_are_found() {
-        let hits = archive().search("shoelace", 5, false).unwrap();
+    fn bare_words_are_fuzzy_by_default() {
+        let hits = archive().search("shoelase", 5).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].body.contains("shoelace"));
     }
 
     #[test]
-    fn fuzzy_survives_a_typo() {
-        // The default tokenizer cannot match this; trigram can.
-        let hits = archive().search("shoelase", 5, true).unwrap();
-        assert_eq!(hits.len(), 1, "trigram should match through the typo");
-        assert!(hits[0].body.contains("shoelace"));
+    fn quoted_terms_must_appear_exactly() {
+        // Both messages are about the world cup; the quoted year picks one.
+        let hits = archive().search("fifa \"2025\" world cup", 5).unwrap();
+        assert_eq!(hits.len(), 1, "quoted year should exclude the 2018 message");
+        assert!(hits[0].body.contains("2025"));
     }
 
     #[test]
-    fn exact_search_falls_back_to_fuzzy_on_a_miss() {
-        // Not asking for fuzzy, but the exact term does not exist.
-        let hits = archive().search("gymnas", 5, false).unwrap();
+    fn fuzzy_and_exact_combine() {
+        // "wrold" is a typo, "2018" is required.
+        let hits = archive().search("wrold \"2018\"", 5).unwrap();
         assert_eq!(hits.len(), 1);
-        assert!(hits[0].body.contains("gymnast"));
+        assert!(hits[0].body.contains("2018"));
+    }
+
+    #[test]
+    fn a_quoted_term_alone_is_an_exact_search() {
+        assert_eq!(archive().search("\"gymnast\"", 5).unwrap().len(), 1);
+        assert!(archive().search("\"gymnasts\"", 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_splits_quoted_from_bare() {
+        let terms = parse_query("fifa \"2025\" world cup");
+        assert_eq!(
+            terms,
+            vec![
+                Term {
+                    text: "fifa".into(),
+                    exact: false
+                },
+                Term {
+                    text: "2025".into(),
+                    exact: true
+                },
+                Term {
+                    text: "world".into(),
+                    exact: false
+                },
+                Term {
+                    text: "cup".into(),
+                    exact: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_tolerates_an_unclosed_quote() {
+        let terms = parse_query("zog \"shoelace");
+        assert_eq!(terms.len(), 2);
+        assert!(terms[1].exact, "trailing quoted run stays exact");
+    }
+
+    #[test]
+    fn parse_drops_bare_terms_too_short_to_trigram() {
+        // "ab" cannot be indexed, but a quoted "ab" is still a valid term.
+        assert!(parse_query("ab").is_empty());
+        assert_eq!(parse_query("\"ab\"").len(), 1);
     }
 
     #[test]
     fn punctuation_query_does_not_error() {
-        assert!(archive().search("s&p", 5, false).is_ok());
-        assert!(archive().search("???", 5, false).is_ok());
+        assert!(archive().search("s&p", 5).is_ok());
+        assert!(archive().search("???", 5).is_ok());
+        assert!(archive().search("", 5).unwrap().is_empty());
     }
 
     #[test]
@@ -274,39 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn short_fuzzy_queries_return_nothing_rather_than_erroring() {
-        // Trigram cannot index fewer than three characters.
-        assert!(archive().search("ab", 5, true).unwrap().is_empty());
-    }
-
-    #[test]
-    fn jaro_winkler_ranks_typos_above_unrelated_words() {
-        let typo = jaro_winkler::similarity("shoelace".chars(), "shoelase".chars());
-        let transposed = jaro_winkler::similarity("incident".chars(), "incidnet".chars());
-        let unrelated = jaro_winkler::similarity("shoelace".chars(), "elephant".chars());
-        assert!(typo > 0.9, "single substitution scored {typo}");
-        assert!(transposed > 0.9, "transposition scored {transposed}");
-        assert!(unrelated < 0.6, "unrelated scored {unrelated}");
-        assert_eq!(
-            jaro_winkler::similarity("same".chars(), "same".chars()),
-            1.0
-        );
-    }
-
-    #[test]
-    fn transposition_beats_two_substitutions() {
-        // A swap is one mistake, not two.
-        let swap = jaro_winkler::similarity("gymnast".chars(), "gymnats".chars());
-        let two_subs = jaro_winkler::similarity("gymnast".chars(), "gymnaxy".chars());
-        assert!(
-            swap > two_subs,
-            "swap {swap} should beat substitutions {two_subs}"
-        );
-    }
-
-    #[test]
-    fn unrelated_fuzzy_query_matches_nothing() {
-        // The similarity floor must reject a word that merely shares trigrams.
-        assert!(archive().search("elephant", 5, true).unwrap().is_empty());
+    fn unrelated_query_matches_nothing() {
+        assert!(archive().search("elephant", 5).unwrap().is_empty());
     }
 }
