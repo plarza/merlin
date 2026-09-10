@@ -38,15 +38,25 @@ three SQLite databases under the state directory.
 
 `cron.db` holds scheduled jobs.
 
+`memory.db` and `messages.db` each carry a sqlite-vec virtual table of embeddings keyed by rowid, recording the model and width they were built with. changing either discards the vectors and rebuilds them, since a vec0 table fixes its dimension at creation and vectors from two models cannot be compared.
+
 ## search
 
 ```
-invoce                       fuzzy, matches "invoice"
-"invoice"                    exact only
-world cup "2025"             loose on world cup, 2025 required
+world cup "2025"             2025 required, world cup matched by meaning
+"invoice"                    exact only, no embedding call
+moving the hardware          pure meaning, matches "relocating the machines"
 ```
 
-quoted terms select the candidate set through the default FTS5 index, ranked by BM25. loose terms then rank that set by Jaro-Winkler similarity from rapidfuzz, keeping scores above 0.82. with nothing quoted, candidates come from the trigram index instead. trigram `MATCH` requires every trigram of the query to be present and so cannot match through a typo alone, which is what the ranking pass is for. an exact search that returns nothing falls back to fuzzy. no embeddings.
+one syntax, borrowed from web search: a quoted term is a requirement, everything unquoted describes the subject.
+
+quoted terms select the candidate set through the default FTS5 index. the unquoted remainder is embedded and ranks that set by cosine distance in sqlite-vec. with nothing quoted the ranking runs over the whole archive; with nothing unquoted there is no embedding call at all and BM25 order stands.
+
+the two are never mixed into one score. BM25 ranks by term statistics and cosine ranks by direction in embedding space, so a weighted sum of them is a number that means nothing. instead each does the job it is good at: the quoted part decides what is eligible, the unquoted part decides what is best.
+
+cosine is chosen over dot product because it ignores magnitude. Matryoshka truncation returns vectors that are not unit length, so ranking on direction alone removes a renormalisation step that would otherwise be silently wrong.
+
+a background loop embeds whatever has no vector yet, newest first, and sleeps once it catches up. writes never wait on the network, which makes the initial backfill and steady state the same code path. until a row is embedded it is still reachable: the trigram index and Jaro-Winkler ranking from rapidfuzz remain as the fallback, so search degrades to approximate string matching rather than returning nothing.
 
 ## scheduling
 
@@ -80,8 +90,10 @@ context_window  = 64
 timezone        = "Australia/Sydney"
 
 [model]
-chat  = "z-ai/glm-5.3-flash"
-image = "meta/muse-image"
+chat       = "z-ai/glm-5.3-flash"
+image      = "meta/muse-image"
+embedding  = "google/gemini-embedding-001"
+embedding_dimensions = 768
 
 [limits]
 max_response_bytes = 8388608
@@ -89,6 +101,7 @@ tool_iterations    = 16
 request_timeout_s  = 120
 exec_timeout_s     = 60
 exec_memory_max    = "1G"
+embed_batch        = 32
 ```
 
 both allowlists fail closed: empty means none, and the process refuses to start.
