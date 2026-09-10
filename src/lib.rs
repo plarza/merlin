@@ -14,3 +14,4 @@ pub mod query;
 pub mod room;
 pub mod scheduler;
 pub mod tools;
+pub mod workspace;

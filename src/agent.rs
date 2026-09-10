@@ -4,13 +4,14 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::llm::{Attachment, Llm, Message};
-use crate::tools::{Outcome, Tools, definitions};
+use crate::tools::{Ctx, Outcome, Tools, definitions};
 
 pub struct Agent {
     pub llm: Arc<Llm>,
     pub tools: Arc<Tools>,
     pub soul: String,
     pub max_iterations: usize,
+    pub timezone: chrono_tz::Tz,
 }
 
 #[derive(Default)]
@@ -23,6 +24,10 @@ pub struct TurnResult {
     /// Tool names in the order they ran, so a slow turn can be explained.
     pub tools_used: Vec<String>,
 }
+
+/// Where intermediate messages go while a turn is still running.
+/// Fed by the `send_message` tool, so the model chooses when an update is worth sending rather than having its narration forwarded whether it meant it or not.
+pub type Progress = tokio::sync::mpsc::UnboundedSender<String>;
 
 pub struct Image {
     pub bytes: Vec<u8>,
@@ -44,8 +49,16 @@ pub struct Incoming<'a> {
 }
 
 impl Agent {
-    pub async fn turn(&self, incoming: Incoming<'_>) -> Result<TurnResult> {
-        let mut messages = vec![Message::system(system_prompt(&self.soul, &incoming))];
+    pub async fn turn(
+        &self,
+        incoming: Incoming<'_>,
+        progress: Option<&Progress>,
+    ) -> Result<TurnResult> {
+        let now = chrono::Utc::now()
+            .with_timezone(&self.timezone)
+            .format("%A, %-d %B %Y, %H:%M (%Z)")
+            .to_string();
+        let mut messages = vec![Message::system(system_prompt(&self.soul, &incoming, &now))];
         let text = format!("{}: {}", incoming.sender, incoming.body);
         messages.push(if incoming.attachments.is_empty() {
             Message::user(text)
@@ -53,6 +66,10 @@ impl Agent {
             Message::user_with_images(text, &incoming.attachments)
         });
 
+        let ctx = Ctx {
+            room_id: incoming.room_id,
+            progress,
+        };
         let tool_defs = definitions();
         let mut result = TurnResult::default();
 
@@ -81,10 +98,7 @@ impl Agent {
                     .unwrap_or_else(|_| serde_json::json!({}));
 
                 let started = std::time::Instant::now();
-                let outcome = self
-                    .tools
-                    .dispatch(&call.function.name, &args, incoming.room_id)
-                    .await;
+                let outcome = self.tools.dispatch(&call.function.name, &args, &ctx).await;
                 tracing::info!(
                     tool = %call.function.name,
                     ms = started.elapsed().as_millis() as u64,
@@ -134,8 +148,22 @@ impl Agent {
 
 /// Assemble the system prompt.
 /// Free-standing so it can be tested without constructing an LLM client or a tool registry.
-fn system_prompt(soul: &str, incoming: &Incoming<'_>) -> String {
+fn system_prompt(soul: &str, incoming: &Incoming<'_>, now: &str) -> String {
     let mut prompt = soul.to_string();
+
+    prompt.push_str(&format!("\n\n## right now\n\n{now}\n"));
+
+    prompt.push_str(
+        "\n\n## your machine\n\n         You have a persistent Linux sandbox and a workspace directory that survive between \
+         conversations. run_code executes bash or python there, starting in the workspace, \
+         and you are root inside it: install whatever you need with apk, pip or npm and it \
+         stays installed. Reach the internet with curl or wget from the shell rather than \
+         asking for a tool. Nothing you do in there can touch anything else, so experiment \
+         freely, but the LAN is unreachable by design.\n\n         Read, list and search with cat, ls and rg in the shell. Two things are tools rather \
+         than shell commands because the shell cannot do them safely: write_file, which avoids \
+         guessing a heredoc delimiter, and edit_file, which refuses unless the text you give it \
+         matches exactly once and applies all of its edits or none.\n",
+    );
 
     if let Some(parent) = &incoming.reply_parent {
         prompt.push_str(&format!(

@@ -17,6 +17,7 @@ pub struct Llm {
     api_key: String,
     chat_model: String,
     image_model: String,
+    reasoning_effort: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +137,7 @@ impl Llm {
         api_key: String,
         chat_model: String,
         image_model: String,
+        reasoning_effort: String,
         timeout_s: u64,
     ) -> Result<Self> {
         // read_timeout applies between reads rather than to the whole response, so a long generation is fine and only a genuine stall fails.
@@ -148,6 +150,7 @@ impl Llm {
             api_key,
             chat_model,
             image_model,
+            reasoning_effort,
         })
     }
 
@@ -165,6 +168,13 @@ impl Llm {
         if !tools.is_empty() {
             body["tools"] = json!(tools);
             body["tool_choice"] = json!("auto");
+        }
+
+        // Reasoning cannot be switched off on every endpoint, but its budget can be capped.
+        // Left uncapped, a model of this class spends the large majority of its output tokens thinking, on trivial questions as much as hard ones,
+        // and pays that cost again on every tool round.
+        if !self.reasoning_effort.is_empty() && self.reasoning_effort != "default" {
+            body["reasoning"] = json!({ "effort": self.reasoning_effort });
         }
 
         let resp = self

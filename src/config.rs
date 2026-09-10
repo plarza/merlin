@@ -47,6 +47,10 @@ pub struct ModelConfig {
     pub chat: String,
     #[serde(default = "default_image_model")]
     pub image: String,
+    /// How much of the token budget the model may spend thinking.
+    /// "low" keeps tool-heavy turns responsive; "default" leaves it to the provider.
+    #[serde(default = "default_reasoning_effort")]
+    pub reasoning_effort: String,
     #[serde(default = "default_embedding_model")]
     pub embedding: String,
     /// Matryoshka truncation width.
@@ -180,66 +184,39 @@ fn opt(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-impl Default for ModelConfig {
-    fn default() -> Self {
-        Self {
-            chat: default_chat_model(),
-            image: default_image_model(),
-            embedding: default_embedding_model(),
-            embedding_dimensions: default_embedding_dimensions(),
-        }
-    }
+/// Serde needs a function per default, so they are generated from one list rather than written out one at a time.
+macro_rules! defaults {
+    ($($name:ident -> $ty:ty = $value:expr;)*) => {
+        $(fn $name() -> $ty { $value.into() })*
+    };
 }
 
-impl Default for Limits {
-    fn default() -> Self {
-        Self {
-            max_response_bytes: default_max_response_bytes(),
-            tool_iterations: default_tool_iterations(),
-            request_timeout_s: default_request_timeout_s(),
-            exec_timeout_s: default_exec_timeout_s(),
-            exec_memory_max: default_exec_memory_max(),
-            embed_batch: default_embed_batch(),
-        }
-    }
+defaults! {
+    default_context_window     -> usize   = 40usize;
+    default_timezone           -> String  = "Australia/Sydney";
+    default_chat_model         -> String  = "z-ai/glm-5.3-flash";
+    default_image_model        -> String  = "meta/muse-image";
+    default_reasoning_effort   -> String  = "low";
+    default_embedding_model    -> String  = "google/gemini-embedding-001";
+    default_embedding_dimensions -> usize = 768usize;
+    default_embed_batch        -> usize   = 32usize;
+    default_max_response_bytes -> usize   = 8usize * 1024 * 1024;
+    default_tool_iterations    -> usize   = 32usize;
+    default_request_timeout_s  -> u64     = 120u64;
+    default_exec_timeout_s     -> u64     = 60u64;
+    default_exec_memory_max    -> String  = "1G";
+    default_state_dir          -> PathBuf = PathBuf::from("/var/lib/merlin");
 }
 
-fn default_context_window() -> usize {
-    40
+/// Deserialised from nothing, so every default comes from the serde attributes above and the two can never drift apart.
+macro_rules! default_via_serde {
+    ($($ty:ty),*) => {
+        $(impl Default for $ty {
+            fn default() -> Self {
+                toml::from_str("").expect("every field has a serde default")
+            }
+        })*
+    };
 }
-fn default_timezone() -> String {
-    "Australia/Sydney".into()
-}
-fn default_chat_model() -> String {
-    "z-ai/glm-5.3-flash".into()
-}
-fn default_image_model() -> String {
-    "meta/muse-image".into()
-}
-fn default_embedding_model() -> String {
-    "google/gemini-embedding-001".into()
-}
-fn default_embedding_dimensions() -> usize {
-    768
-}
-fn default_embed_batch() -> usize {
-    32
-}
-fn default_max_response_bytes() -> usize {
-    8 * 1024 * 1024
-}
-fn default_tool_iterations() -> usize {
-    6
-}
-fn default_request_timeout_s() -> u64 {
-    120
-}
-fn default_exec_timeout_s() -> u64 {
-    60
-}
-fn default_exec_memory_max() -> String {
-    "1G".into()
-}
-fn default_state_dir() -> PathBuf {
-    PathBuf::from("/var/lib/merlin")
-}
+
+default_via_serde!(ModelConfig, Limits);

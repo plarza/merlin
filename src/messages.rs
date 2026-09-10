@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use rapidfuzz::distance::jaro_winkler;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use std::path::Path;
 
 use crate::embed;
@@ -103,13 +103,7 @@ impl Archive {
              ) ORDER BY at ASC",
         )?;
         let rows = stmt
-            .query_map(params![room_id, limit as i64], |r| {
-                Ok(Archived {
-                    sender: r.get(0)?,
-                    body: r.get(1)?,
-                    at: r.get(2)?,
-                })
-            })?
+            .query_map(params![room_id, limit as i64], to_archived)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -125,9 +119,14 @@ impl Archive {
         embed::ensure_table(&self.conn, VEC_TABLE, VEC_KEY, model, dimensions)
     }
 
-    /// Messages with no vector yet, newest first, as (rowid, text to embed).
+    pub fn pending_count(&self) -> Result<i64> {
+        embed::count_pending(&self.conn, "messages", VEC_TABLE, VEC_KEY)
+    }
+}
+
+impl embed::Embeddable for Archive {
     /// Recent history is the part most likely to be asked about, so it is embedded before the backlog.
-    pub fn pending_embeddings(&self, limit: usize) -> Result<Vec<(i64, String)>> {
+    fn pending_embeddings(&self, limit: usize) -> Result<Vec<(i64, String)>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT rowid, body FROM messages
              WHERE rowid NOT IN (SELECT {VEC_KEY} FROM {VEC_TABLE})
@@ -139,14 +138,12 @@ impl Archive {
         Ok(rows)
     }
 
-    pub fn save_embeddings(&mut self, rows: &[(i64, Vec<f32>)]) -> Result<usize> {
+    fn save_embeddings(&mut self, rows: &[(i64, Vec<f32>)]) -> Result<usize> {
         embed::save(&mut self.conn, VEC_TABLE, VEC_KEY, rows)
     }
+}
 
-    pub fn pending_count(&self) -> Result<i64> {
-        embed::count_pending(&self.conn, "messages", VEC_TABLE, VEC_KEY)
-    }
-
+impl Archive {
     /// Search with Google-style syntax.
     /// Quoted terms must appear exactly and select the candidate set; the unquoted remainder describes the subject and ranks that set by meaning.
     ///
@@ -177,11 +174,19 @@ impl Archive {
 
         if let Some(vector) = vector {
             let hits = if exact.is_empty() {
-                self.nearest_rows(vector, limit)?
+                {
+                    let ids = embed::nearest(&self.conn, VEC_TABLE, VEC_KEY, vector, limit)?;
+                    embed::load_ordered(
+                        &self.conn,
+                        "SELECT sender, body, at FROM messages WHERE rowid = ?1",
+                        &ids,
+                        to_archived,
+                    )?
+                }
             } else {
                 let candidates =
                     self.query_index("messages_fts", &required_expr(&exact), CANDIDATE_CAP)?;
-                self.rank_by_vector(candidates, vector, limit)?
+                embed::rank(&self.conn, VEC_TABLE, VEC_KEY, candidates, vector, limit)?
             };
             if !hits.is_empty() {
                 return Ok(hits);
@@ -189,61 +194,6 @@ impl Archive {
         }
 
         self.search_approximate(&exact, &loose, limit)
-    }
-
-    /// Rank a candidate set by cosine against the query vector.
-    /// Candidates with no vector yet fall in behind everything scored instead of disappearing, which keeps results sane mid-backfill.
-    fn rank_by_vector(
-        &self,
-        candidates: Vec<(i64, Archived)>,
-        vector: &[f32],
-        limit: usize,
-    ) -> Result<Vec<Archived>> {
-        let ids: Vec<i64> = candidates.iter().map(|(id, _)| *id).collect();
-        let vectors = embed::vectors_for(&self.conn, VEC_TABLE, VEC_KEY, &ids)?;
-        if vectors.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut scored: Vec<(f32, Archived)> = Vec::new();
-        let mut unscored: Vec<Archived> = Vec::new();
-        for (id, row) in candidates {
-            match vectors.get(&id) {
-                Some(v) => scored.push((embed::cosine(vector, v), row)),
-                None => unscored.push(row),
-            }
-        }
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        let mut out: Vec<Archived> = scored.into_iter().map(|(_, r)| r).collect();
-        out.extend(unscored);
-        out.truncate(limit);
-        Ok(out)
-    }
-
-    /// Nearest messages by meaning across the whole archive, closest first.
-    fn nearest_rows(&self, vector: &[f32], limit: usize) -> Result<Vec<Archived>> {
-        let ids = embed::nearest(&self.conn, VEC_TABLE, VEC_KEY, vector, limit)?;
-        let mut out = Vec::with_capacity(ids.len());
-        let mut stmt = self
-            .conn
-            .prepare("SELECT sender, body, at FROM messages WHERE rowid = ?1")?;
-        for id in ids {
-            // Ordering comes from the vector search, so rows are fetched one at a time to preserve it.
-            let row = stmt
-                .query_row(params![id], |r| {
-                    Ok(Archived {
-                        sender: r.get(0)?,
-                        body: r.get(1)?,
-                        at: r.get(2)?,
-                    })
-                })
-                .optional()?;
-            if let Some(row) = row {
-                out.push(row);
-            }
-        }
-        Ok(out)
     }
 
     /// The fallback when no embedding is available: trigram candidates ranked by Jaro-Winkler similarity.
@@ -346,4 +296,12 @@ fn best_similarity(terms: &[String], body: &str) -> f64 {
         }
     }
     best
+}
+
+fn to_archived(r: &rusqlite::Row<'_>) -> rusqlite::Result<Archived> {
+    Ok(Archived {
+        sender: r.get(0)?,
+        body: r.get(1)?,
+        at: r.get(2)?,
+    })
 }

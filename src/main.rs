@@ -15,6 +15,7 @@ use merlin::memory::Memory;
 use merlin::messages::Archive;
 use merlin::room::Buffers;
 use merlin::tools::Tools;
+use merlin::workspace::Workspace;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -88,6 +89,7 @@ async fn main() -> Result<()> {
         secrets.openrouter_api_key.clone(),
         config.model.chat.clone(),
         config.model.image.clone(),
+        config.model.reasoning_effort.clone(),
         config.limits.request_timeout_s,
     )?);
 
@@ -118,6 +120,11 @@ async fn main() -> Result<()> {
         config.limits.exec_memory_max.clone(),
     ));
 
+    // Deliberately outside the 0700 state directory: the sandbox uid shares this
+    // directory, and must not be given a foothold beside the databases.
+    let workspace = Arc::new(Workspace::new(workspace_dir())?);
+    tracing::info!(path = %workspace.root().display(), "workspace ready");
+
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(
             config.limits.request_timeout_s,
@@ -129,6 +136,7 @@ async fn main() -> Result<()> {
         archive: Arc::clone(&archive),
         cron: Arc::clone(&cron_store),
         sandbox,
+        workspace,
         llm: Arc::clone(&llm),
         http,
         exa_key: secrets.exa_api_key.clone(),
@@ -141,6 +149,7 @@ async fn main() -> Result<()> {
         tools,
         soul,
         max_iterations: config.limits.tool_iterations,
+        timezone: config.tz(),
     });
 
     let link = merlin::matrix::connect(&config, &secrets).await?;
@@ -222,6 +231,15 @@ async fn main() -> Result<()> {
     bot.run().await
 }
 
+/// Where the agent's files live.
+/// Shared with the sandbox uid, so it sits beside the state directory rather than inside it.
+fn workspace_dir() -> PathBuf {
+    match std::env::var("MERLIN_WORKSPACE") {
+        Ok(v) if !v.trim().is_empty() => PathBuf::from(v),
+        _ => PathBuf::from("/var/lib/merlin-workspace"),
+    }
+}
+
 /// How `run_code` reaches the sandbox.
 /// Overridable so the bot can run outside NixOS, where the production wrapper does not exist.
 fn exec_runner() -> Vec<String> {
@@ -232,7 +250,7 @@ fn exec_runner() -> Vec<String> {
             "-n".into(),
             "-u".into(),
             "merlin-exec".into(),
-            "/run/current-system/sw/bin/merlin-sandbox".into(),
+            "/run/current-system/sw/bin/merlin-sandbox-configured".into(),
         ],
     }
 }

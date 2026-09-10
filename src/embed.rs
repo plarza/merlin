@@ -235,6 +235,64 @@ pub fn nearest(
     Ok(rows)
 }
 
+/// A store whose rows can be embedded.
+/// Memories and messages differ in every other respect but drain identically, so the backlog loop is written once against this.
+pub trait Embeddable {
+    /// Rows with no vector yet, newest first, as (rowid, text to embed).
+    fn pending_embeddings(&self, limit: usize) -> Result<Vec<(i64, String)>>;
+    fn save_embeddings(&mut self, rows: &[(i64, Vec<f32>)]) -> Result<usize>;
+}
+
+/// Load rows by rowid, preserving the order given and skipping any that have gone.
+/// Vector search returns an order that a SQL `IN` clause would discard, which is why these are fetched one at a time.
+pub fn load_ordered<T>(
+    conn: &Connection,
+    sql: &str,
+    ids: &[i64],
+    map: impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+) -> Result<Vec<T>> {
+    let mut stmt = conn.prepare(sql)?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(row) = stmt.query_row(params![id], &map).optional()? {
+            out.push(row);
+        }
+    }
+    Ok(out)
+}
+
+/// Rank a candidate set by cosine against the query vector.
+/// Candidates with no vector yet fall in behind everything scored rather than disappearing, which keeps results sane mid-backfill.
+pub fn rank<T>(
+    conn: &Connection,
+    table: &str,
+    key: &str,
+    candidates: Vec<(i64, T)>,
+    vector: &[f32],
+    limit: usize,
+) -> Result<Vec<T>> {
+    let ids: Vec<i64> = candidates.iter().map(|(id, _)| *id).collect();
+    let vectors = vectors_for(conn, table, key, &ids)?;
+    if vectors.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut scored: Vec<(f32, T)> = Vec::new();
+    let mut unscored: Vec<T> = Vec::new();
+    for (id, row) in candidates {
+        match vectors.get(&id) {
+            Some(v) => scored.push((cosine(vector, v), row)),
+            None => unscored.push(row),
+        }
+    }
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut out: Vec<T> = scored.into_iter().map(|(_, r)| r).collect();
+    out.extend(unscored);
+    out.truncate(limit);
+    Ok(out)
+}
+
 /// Vectors for specific rowids, for ranking a candidate set that was chosen by some other index.
 /// Rows with no vector yet are absent from the map rather than an error, since the backlog loop may not have reached them.
 pub fn vectors_for(
@@ -314,7 +372,7 @@ pub async fn run(
     loop {
         let mut worked = false;
 
-        match drain_memories(&embedder, &memory, batch).await {
+        match drain(&embedder, memory.as_ref(), batch).await {
             Ok(0) => {}
             Ok(n) => {
                 worked = true;
@@ -323,7 +381,7 @@ pub async fn run(
             Err(e) => tracing::warn!(error = %e, "embedding memories failed"),
         }
 
-        match drain_messages(&embedder, &archive, batch).await {
+        match drain(&embedder, archive.as_ref(), batch).await {
             Ok(0) => {}
             Ok(n) => {
                 worked = true;
@@ -337,14 +395,14 @@ pub async fn run(
     }
 }
 
-async fn drain_memories(
+async fn drain<S: Embeddable>(
     embedder: &Embedder,
-    memory: &Mutex<Memory>,
+    store: &Mutex<S>,
     batch: usize,
 ) -> Result<usize> {
     // The lock is released before the request: holding it across an await would stall every tool for the duration of the call.
     let work = {
-        let store = memory.lock().unwrap();
+        let store = store.lock().unwrap();
         store.pending_embeddings(batch)?
     };
     if work.is_empty() {
@@ -355,27 +413,5 @@ async fn drain_memories(
     let vectors = embedder.embed(&texts).await?;
     let rows: Vec<(i64, Vec<f32>)> = work.iter().map(|(id, _)| *id).zip(vectors).collect();
 
-    let mut store = memory.lock().unwrap();
-    store.save_embeddings(&rows)
-}
-
-async fn drain_messages(
-    embedder: &Embedder,
-    archive: &Mutex<Archive>,
-    batch: usize,
-) -> Result<usize> {
-    let work = {
-        let store = archive.lock().unwrap();
-        store.pending_embeddings(batch)?
-    };
-    if work.is_empty() {
-        return Ok(0);
-    }
-
-    let texts: Vec<String> = work.iter().map(|(_, t)| t.clone()).collect();
-    let vectors = embedder.embed(&texts).await?;
-    let rows: Vec<(i64, Vec<f32>)> = work.iter().map(|(id, _)| *id).zip(vectors).collect();
-
-    let mut store = archive.lock().unwrap();
-    store.save_embeddings(&rows)
+    store.lock().unwrap().save_embeddings(&rows)
 }

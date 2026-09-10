@@ -136,10 +136,18 @@ impl Memory {
 
         if let Some(vector) = vector {
             let hits = if exact.is_empty() {
-                self.nearest_records(vector, limit)?
+                {
+                    let ids = embed::nearest(&self.conn, VEC_TABLE, VEC_KEY, vector, limit)?;
+                    embed::load_ordered(
+                        &self.conn,
+                        "SELECT key, content, category, created_at FROM memories WHERE rowid = ?1",
+                        &ids,
+                        row_to_record,
+                    )?
+                }
             } else {
                 let candidates = self.required(&exact, CANDIDATE_CAP)?;
-                self.rank_by_vector(candidates, vector, limit)?
+                embed::rank(&self.conn, VEC_TABLE, VEC_KEY, candidates, vector, limit)?
             };
             if !hits.is_empty() {
                 return Ok(hits);
@@ -164,52 +172,6 @@ impl Memory {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
-    }
-
-    /// Rank a candidate set by cosine against the query vector.
-    /// Candidates with no vector yet fall in behind everything scored rather than disappearing.
-    fn rank_by_vector(
-        &self,
-        candidates: Vec<(i64, Record)>,
-        vector: &[f32],
-        limit: usize,
-    ) -> Result<Vec<Record>> {
-        let ids: Vec<i64> = candidates.iter().map(|(id, _)| *id).collect();
-        let vectors = embed::vectors_for(&self.conn, VEC_TABLE, VEC_KEY, &ids)?;
-        if vectors.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut scored: Vec<(f32, Record)> = Vec::new();
-        let mut unscored: Vec<Record> = Vec::new();
-        for (id, row) in candidates {
-            match vectors.get(&id) {
-                Some(v) => scored.push((embed::cosine(vector, v), row)),
-                None => unscored.push(row),
-            }
-        }
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        let mut out: Vec<Record> = scored.into_iter().map(|(_, r)| r).collect();
-        out.extend(unscored);
-        out.truncate(limit);
-        Ok(out)
-    }
-
-    /// Nearest memories by meaning across the whole store, closest first.
-    fn nearest_records(&self, vector: &[f32], limit: usize) -> Result<Vec<Record>> {
-        let ids = embed::nearest(&self.conn, VEC_TABLE, VEC_KEY, vector, limit)?;
-        let mut out = Vec::with_capacity(ids.len());
-        let mut stmt = self
-            .conn
-            .prepare("SELECT key, content, category, created_at FROM memories WHERE rowid = ?1")?;
-        for id in ids {
-            // Ordering comes from the vector search, so rows are fetched one at a time to preserve it.
-            if let Some(record) = stmt.query_row(params![id], row_to_record).optional()? {
-                out.push(record);
-            }
-        }
-        Ok(out)
     }
 
     /// The fallback when no embedding is available.
@@ -262,10 +224,15 @@ impl Memory {
         embed::ensure_table(&self.conn, VEC_TABLE, VEC_KEY, model, dimensions)
     }
 
-    /// Memories with no vector yet, newest first, as (rowid, text to embed).
-    ///
-    /// Only the content is embedded. Keys are frequently opaque identifiers rather than descriptions, and feeding one into an embedding is noise.
-    pub fn pending_embeddings(&self, limit: usize) -> Result<Vec<(i64, String)>> {
+    pub fn pending_count(&self) -> Result<i64> {
+        embed::count_pending(&self.conn, "memories", VEC_TABLE, VEC_KEY)
+    }
+}
+
+impl embed::Embeddable for Memory {
+    /// Only the content is embedded.
+    /// Keys are frequently opaque identifiers rather than descriptions, and feeding one into an embedding is noise.
+    fn pending_embeddings(&self, limit: usize) -> Result<Vec<(i64, String)>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT rowid, content FROM memories
              WHERE rowid NOT IN (SELECT {VEC_KEY} FROM {VEC_TABLE})
@@ -277,14 +244,12 @@ impl Memory {
         Ok(rows)
     }
 
-    pub fn save_embeddings(&mut self, rows: &[(i64, Vec<f32>)]) -> Result<usize> {
+    fn save_embeddings(&mut self, rows: &[(i64, Vec<f32>)]) -> Result<usize> {
         embed::save(&mut self.conn, VEC_TABLE, VEC_KEY, rows)
     }
+}
 
-    pub fn pending_count(&self) -> Result<i64> {
-        embed::count_pending(&self.conn, "memories", VEC_TABLE, VEC_KEY)
-    }
-
+impl Memory {
     pub fn count(&self) -> Result<i64> {
         Ok(self
             .conn

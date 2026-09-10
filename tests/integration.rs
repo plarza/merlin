@@ -4,6 +4,7 @@
 //! not that a helper returns what it was told to.
 
 use merlin::cron::{CronStore, Job};
+use merlin::embed::Embeddable;
 use merlin::exec::Sandbox;
 use merlin::llm::{Attachment, Message};
 use merlin::memory::Memory;
@@ -642,14 +643,104 @@ fn every_tool_the_agent_is_offered_is_described() {
         "search_messages",
         "web_search",
         "web_fetch",
-        "http_request",
         "generate_image",
+        "send_message",
+        "write_file",
+        "edit_file",
         "run_code",
         "cron_create",
         "cron_list",
         "cron_delete",
-        "time_now",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
+
+    // Dropped once the sandbox gained a shell: curl and date do these jobs, and
+    // every extra tool is another line in every prompt.
+    for gone in [
+        "http_request",
+        "time_now",
+        "read_file",
+        "list_files",
+        "grep_files",
+    ] {
+        assert!(!names.contains(&gone.to_string()), "{gone} should be gone");
+    }
+}
+
+// ── workspace ───────────────────────────────────────────────────────────────
+
+fn workspace(name: &str) -> merlin::workspace::Workspace {
+    merlin::workspace::Workspace::new(scratch(name)).unwrap()
+}
+
+#[test]
+fn an_edit_applies_only_when_every_replacement_is_unambiguous() {
+    let w = workspace("ws-edit");
+    w.write("a.txt", "alpha\nbeta\ngamma\nbeta\n").unwrap();
+
+    // "beta" appears twice, so the edit cannot know which was meant.
+    let ambiguous = w.edit(
+        "a.txt",
+        &[merlin::workspace::Edit {
+            old: "beta".into(),
+            new: "delta".into(),
+        }],
+    );
+    assert!(ambiguous.is_err(), "an ambiguous edit must be refused");
+    assert_eq!(
+        std::fs::read_to_string(w.root().join("a.txt")).unwrap(),
+        "alpha\nbeta\ngamma\nbeta\n",
+        "a refused edit must not have written anything"
+    );
+
+    // A failing edit in a batch rolls the whole batch back, so the file never
+    // ends up half-edited.
+    let partial = w.edit(
+        "a.txt",
+        &[
+            merlin::workspace::Edit {
+                old: "alpha".into(),
+                new: "ALPHA".into(),
+            },
+            merlin::workspace::Edit {
+                old: "nowhere".into(),
+                new: "x".into(),
+            },
+        ],
+    );
+    assert!(partial.is_err());
+    assert_eq!(
+        std::fs::read_to_string(w.root().join("a.txt")).unwrap(),
+        "alpha\nbeta\ngamma\nbeta\n",
+        "no edit may land if any edit in the call fails"
+    );
+
+    w.edit(
+        "a.txt",
+        &[merlin::workspace::Edit {
+            old: "alpha\nbeta".into(),
+            new: "alpha\nBETA".into(),
+        }],
+    )
+    .unwrap();
+    assert!(
+        std::fs::read_to_string(w.root().join("a.txt"))
+            .unwrap()
+            .contains("BETA")
+    );
+}
+
+#[test]
+fn paths_cannot_climb_out_of_the_workspace() {
+    let w = workspace("ws-escape");
+    for attempt in ["../escaped.txt", "../../etc/passwd", "a/../../../tmp/x"] {
+        assert!(
+            w.write(attempt, "nope").is_err(),
+            "{attempt} should have been refused"
+        );
+    }
+    // A leading slash is treated as workspace-relative rather than as the host root.
+    w.write("/inside.txt", "fine").unwrap();
+    assert!(w.root().join("inside.txt").exists());
 }

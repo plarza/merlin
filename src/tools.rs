@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
+use crate::agent::Progress;
 use crate::config::Config;
 use crate::cron::{CronStore, Job};
 use crate::embed::Embedder;
@@ -14,17 +15,26 @@ use crate::exec::Sandbox;
 use crate::llm::Llm;
 use crate::memory::Memory;
 use crate::messages::Archive;
+use crate::workspace::{Edit, Workspace};
 
 pub struct Tools {
     pub memory: Arc<Mutex<Memory>>,
     pub archive: Arc<Mutex<Archive>>,
     pub cron: Arc<Mutex<CronStore>>,
     pub sandbox: Arc<Sandbox>,
+    pub workspace: Arc<Workspace>,
     pub llm: Arc<Llm>,
     pub http: reqwest::Client,
     pub exa_key: Option<String>,
     pub embedder: Arc<Embedder>,
     pub config: Arc<Config>,
+}
+
+/// Everything a tool needs to know about the turn it is running in.
+pub struct Ctx<'a> {
+    pub room_id: &'a str,
+    /// Where an intermediate message goes, when the turn has somewhere to send one.
+    pub progress: Option<&'a Progress>,
 }
 
 /// What a tool produced.
@@ -100,6 +110,15 @@ pub fn definitions() -> Vec<Value> {
             }),
         ),
         f(
+            "send_message",
+            "Send a message to the room right now, without ending your turn. Use this on a long task to say what you have found or what you are about to do, rather than working in silence. Your final answer is sent automatically, so do not repeat it here.",
+            json!({
+                "type": "object",
+                "properties": { "text": { "type": "string" } },
+                "required": ["text"]
+            }),
+        ),
+        f(
             "web_search",
             "Search the web for current information. Not a substitute for memory_recall: private things discussed in this chat will never appear here.",
             json!({
@@ -121,20 +140,6 @@ pub fn definitions() -> Vec<Value> {
             }),
         ),
         f(
-            "http_request",
-            "Make an arbitrary HTTP request, for JSON APIs. Public hosts only.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "method": { "type": "string", "enum": ["GET", "POST", "PUT", "DELETE"] },
-                    "url": { "type": "string" },
-                    "headers": { "type": "object", "description": "Optional header map" },
-                    "body": { "type": "string", "description": "Optional request body" }
-                },
-                "required": ["method", "url"]
-            }),
-        ),
-        f(
             "generate_image",
             "Generate an image from a text prompt and post it to the room.",
             json!({
@@ -147,8 +152,43 @@ pub fn definitions() -> Vec<Value> {
             }),
         ),
         f(
+            "write_file",
+            "Write a file in the workspace, creating parent directories and replacing any existing content. Use edit_file to change part of a file you already have.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["path", "content"]
+            }),
+        ),
+        f(
+            "edit_file",
+            "Replace exact text in a file. Every edit is matched against the original file rather than against earlier edits, so pass several disjoint edits in one call instead of calling repeatedly. Each old_text must appear exactly once: include surrounding lines to make it unique, but no more than needed. Nothing is written unless every edit matches.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "edits": {
+                        "type": "array",
+                        "description": "Disjoint, non-overlapping replacements",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_text": { "type": "string", "description": "Exact text to replace, unique in the file" },
+                                "new_text": { "type": "string" }
+                            },
+                            "required": ["old_text", "new_text"]
+                        }
+                    }
+                },
+                "required": ["path", "edits"]
+            }),
+        ),
+        f(
             "run_code",
-            "Execute code in a sandbox and return its output. Has network access but cannot reach the LAN or read any secrets. Use for calculation, data processing and backtesting.",
+            "Execute code in the sandbox and return its output. It runs in the workspace, so files you wrote are there and files it writes persist for later turns and later tools. Has network access but cannot reach the LAN or read any secrets. Use for calculation, data processing, and for running and testing code you have written.",
             json!({
                 "type": "object",
                 "properties": {
@@ -186,14 +226,6 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["name"]
             }),
         ),
-        f(
-            "time_now",
-            "The current date and time. Call this rather than guessing, and before any reasoning that depends on today's date.",
-            json!({
-                "type": "object",
-                "properties": { "timezone": { "type": "string", "description": "IANA zone, optional" } }
-            }),
-        ),
     ]
 }
 
@@ -205,15 +237,15 @@ fn f(name: &str, description: &str, parameters: Value) -> Value {
 }
 
 impl Tools {
-    pub async fn dispatch(&self, name: &str, args: &Value, room_id: &str) -> Outcome {
-        match self.run(name, args, room_id).await {
+    pub async fn dispatch(&self, name: &str, args: &Value, ctx: &Ctx<'_>) -> Outcome {
+        match self.run(name, args, ctx).await {
             Ok(outcome) => outcome,
             // Tool failures are information for the model, not turn-ending errors: it should be able to try something else or say what broke.
             Err(e) => Outcome::Text(format!("Error from {name}: {e}")),
         }
     }
 
-    async fn run(&self, name: &str, args: &Value, room_id: &str) -> Result<Outcome> {
+    async fn run(&self, name: &str, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
         match name {
             "memory_recall" => {
                 let query = str_arg(args, "query")?;
@@ -238,7 +270,7 @@ impl Tools {
                     .unwrap_or("core");
                 {
                     let mem = self.memory.lock().unwrap();
-                    mem.store(&key, &content, category, Some(room_id))?;
+                    mem.store(&key, &content, category, Some(ctx.room_id))?;
                 }
                 Ok(Outcome::Text(format!("Stored under '{key}'.")))
             }
@@ -268,6 +300,19 @@ impl Tools {
                     return Ok(Outcome::Text(format!("No messages matched '{query}'.")));
                 }
                 Ok(Outcome::Text(render_messages(&hits)))
+            }
+
+            "send_message" => {
+                let text = str_arg(args, "text")?;
+                match ctx.progress {
+                    Some(sink) => {
+                        let _ = sink.send(text);
+                        Ok(Outcome::Text("Sent to the room.".into()))
+                    }
+                    None => Ok(Outcome::Text(
+                        "There is no room to send to from here.".into(),
+                    )),
+                }
             }
 
             "web_search" => {
@@ -332,17 +377,6 @@ impl Tools {
                 Ok(Outcome::Text(truncate(&text, 12_000)))
             }
 
-            "http_request" => {
-                let method = str_arg(args, "method").unwrap_or_else(|_| "GET".into());
-                let url = str_arg(args, "url")?;
-                let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
-                    .context("unsupported HTTP method")?;
-                let headers = args.get("headers").cloned();
-                let body = args.get("body").and_then(Value::as_str).map(str::to_string);
-                let text = self.fetch_capped(method, &url, headers, body).await?;
-                Ok(Outcome::Text(truncate(&text, 12_000)))
-            }
-
             "generate_image" => {
                 let prompt = str_arg(args, "prompt")?;
                 let model = args.get("model").and_then(Value::as_str);
@@ -376,6 +410,29 @@ impl Tools {
                 Ok(Outcome::Text(report))
             }
 
+            "write_file" => {
+                let path = str_arg(args, "path")?;
+                let content = str_arg(args, "content")?;
+                Ok(Outcome::Text(self.workspace.write(&path, &content)?))
+            }
+
+            "edit_file" => {
+                let path = str_arg(args, "path")?;
+                let edits = args
+                    .get("edits")
+                    .and_then(Value::as_array)
+                    .context("missing required argument 'edits'")?
+                    .iter()
+                    .map(|e| {
+                        Ok(Edit {
+                            old: str_arg(e, "old_text")?,
+                            new: str_arg(e, "new_text")?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Outcome::Text(self.workspace.edit(&path, &edits)?))
+            }
+
             "cron_create" => {
                 let name = str_arg(args, "name")?;
                 let schedule = str_arg(args, "schedule")?;
@@ -391,7 +448,7 @@ impl Tools {
                     schedule: schedule.clone(),
                     timezone: tz,
                     prompt,
-                    room_id: room_id.to_string(),
+                    room_id: ctx.room_id.to_string(),
                     enabled: true,
                 };
                 job.validate()?;
@@ -436,18 +493,6 @@ impl Tools {
                 } else {
                     format!("No job named '{name}'.")
                 }))
-            }
-
-            "time_now" => {
-                let tz: chrono_tz::Tz = args
-                    .get("timezone")
-                    .and_then(Value::as_str)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or_else(|| self.config.tz());
-                let now = chrono::Utc::now().with_timezone(&tz);
-                Ok(Outcome::Text(
-                    now.format("%A, %-d %B %Y, %H:%M (%Z)").to_string(),
-                ))
             }
 
             other => anyhow::bail!("unknown tool '{other}'"),

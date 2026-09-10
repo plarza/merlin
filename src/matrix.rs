@@ -88,7 +88,11 @@ impl Bot {
             .map_err(|e| anyhow::anyhow!("matrix sync stopped: {e:?}"))
     }
 
-    async fn on_message(&self, event: OriginalSyncRoomMessageEvent, room: Room) -> Result<()> {
+    async fn on_message(
+        self: &Arc<Self>,
+        event: OriginalSyncRoomMessageEvent,
+        room: Room,
+    ) -> Result<()> {
         let room_id = room.room_id().to_string();
         if !self.config.is_allowed_room(&room_id) {
             return Ok(());
@@ -185,17 +189,40 @@ impl Bot {
             tracing::debug!("could not send typing notice");
         }
 
+        // Intermediate messages are posted as they arrive rather than collected,
+        // so a long task reads as progress instead of a minute of silence.
+        let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let pump = {
+            let bot = Arc::clone(self);
+            let room = room.clone();
+            tokio::spawn(async move {
+                while let Some(text) = updates.recv().await {
+                    if let Err(e) = bot.send_text(&room, &text).await {
+                        tracing::warn!(error = %e, "failed sending an intermediate message");
+                    }
+                }
+            })
+        };
+
         let result = self
             .agent
-            .turn(Incoming {
-                room_id: &room_id,
-                sender: &sender,
-                body: &body,
-                ambient,
-                reply_parent: reply_parent.map(|(_, body)| body),
-                attachments,
-            })
+            .turn(
+                Incoming {
+                    room_id: &room_id,
+                    sender: &sender,
+                    body: &body,
+                    ambient,
+                    reply_parent: reply_parent.map(|(_, body)| body),
+                    attachments,
+                },
+                Some(&progress),
+            )
             .await;
+
+        // Closing the channel and waiting for the pump guarantees every update
+        // has landed before the final answer follows it.
+        drop(progress);
+        let _ = pump.await;
 
         let _ = room.typing_notice(false).await;
 

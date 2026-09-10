@@ -136,18 +136,37 @@ async fn register(
     Ok(uuid)
 }
 
-async fn run_once(job: &Job, agent: &Agent, bot: &Bot) -> Result<()> {
-    let result = agent
-        .turn(Incoming {
-            room_id: &job.room_id,
-            // Marked as the scheduler rather than a person, so the model does not address the reply to whoever last spoke.
-            sender: "scheduler",
-            body: &job.prompt,
-            ambient: None,
-            reply_parent: None,
-            attachments: Vec::new(),
+async fn run_once(job: &Job, agent: &Agent, bot: &Arc<Bot>) -> Result<()> {
+    let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let pump = {
+        let bot = Arc::clone(bot);
+        let room_id = job.room_id.clone();
+        tokio::spawn(async move {
+            while let Some(text) = updates.recv().await {
+                if let Err(e) = bot.post(&room_id, &text).await {
+                    tracing::warn!(error = %e, "failed sending an intermediate message");
+                }
+            }
         })
+    };
+
+    let result = agent
+        .turn(
+            Incoming {
+                room_id: &job.room_id,
+                // Marked as the scheduler rather than a person, so the model does not address the reply to whoever last spoke.
+                sender: "scheduler",
+                body: &job.prompt,
+                ambient: None,
+                reply_parent: None,
+                attachments: Vec::new(),
+            },
+            Some(&progress),
+        )
         .await?;
+
+    drop(progress);
+    let _ = pump.await;
 
     if !result.text.is_empty() {
         bot.post(&job.room_id, &result.text).await?;
