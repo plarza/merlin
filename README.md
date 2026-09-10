@@ -1,33 +1,40 @@
-merlin is a Matrix bot that reads the whole room and answers only when addressed.
+<div align="center">
+<img src="docs/merlin.jpg" alt="merlin" width="240">
 
-It replaced a general-purpose agent framework of 961,594 lines with 2,184 lines that do the same job for one homeserver.
+# merlin
+*meta ai for matrix*
+</div>
 
----
+A single-binary AI agent for Matrix. Tools, memory, scheduling and sandboxed code execution in ~2,200 lines of Rust and one config file.
 
-merlin is:
+```
+merlin what did the s&p do this week   ->  searches, answers
+merlin remember jakob hates mondays    ->  stores it, recalls it later
+merlin backtest this on 5y of AAPL     ->  writes python, runs it sandboxed
+merlin post the HN top 5 at 7am daily  ->  schedules itself
+```
 
-- **Ambient.** Every message in an allowed room is buffered. The model runs only when the bot is addressed, so unaddressed conversation costs nothing and is never written to disk.
-- **Persistent.** Memory is SQLite with an FTS5 mirror. No agent or tenant foreign key, so renaming the bot is a config edit rather than a migration.
-- **Single-provider.** OpenRouter for both text and images. No second vendor, no second key.
-- **Sandboxed.** `run_code` runs as a user that owns nothing, with network but no LAN and no access to the bot's state or credentials.
+## Design
 
----
+- **Ambient.** Every message in the room is context. The model runs only when the bot is addressed, so ordinary conversation costs nothing.
+- **One provider.** OpenRouter for text and images. One key, two endpoints.
+- **Flat memory.** SQLite with FTS5. No ORM, no vector database, no embeddings.
+- **Sandboxed.** Generated code runs as a user that owns nothing, with internet but no LAN and no access to the bot's own state or keys.
+- **Declarative.** A TOML file and an environment file. Ships with a NixOS module.
 
 ## Addressing
 
-A turn starts when a message mentions the bot and comes from an allowed sender. Everything else is context.
+A turn starts when an allowed sender addresses the bot. Everything else is buffered as context.
 
 ```
-merlin what did he mean by that      -> turn (name, word boundary)
-@merlin hello                        -> turn (pill or plain)
-(reply to one of its messages)       -> turn
-merlinesque behaviour                -> buffered only, no model call
-what do you reckon                   -> buffered only, no model call
+merlin what did he mean by that      turn
+@merlin hello                        turn
+(reply to one of its messages)       turn
+merlinesque behaviour                context only
+what do you reckon                   context only
 ```
 
-Matching is word-boundary, not substring. A bot that wakes on any occurrence of its name wakes on `merlin dont respond`.
-
-Replies carry the parent message's text into the prompt. Without that, replying to a message with just the bot's name arrives blank.
+Name matching is word-boundary. Replies carry the parent message into the prompt.
 
 ## Tools
 
@@ -36,6 +43,7 @@ Replies carry the parent message's text into the prompt. Without that, replying 
 | `memory_recall` | `query`, `limit` |
 | `memory_store` | `key`, `content`, `category` |
 | `memory_forget` | `key` |
+| `search_messages` | `query`, `limit`, `fuzzy` |
 | `web_search` | `query`, `num_results` |
 | `web_fetch` | `url` |
 | `http_request` | `method`, `url`, `headers`, `body` |
@@ -45,17 +53,28 @@ Replies carry the parent message's text into the prompt. Without that, replying 
 | `cron_list`, `cron_delete` | `name` |
 | `time_now` | `timezone` |
 
-There is no approval prompt. The sender allowlist is the boundary.
+No approval prompts. The sender allowlist is the boundary.
+
+## Message history
+
+Every message is archived to SQLite and searchable two ways:
+
+```
+search_messages(query="shoelace incident")               exact terms, BM25 ranked
+search_messages(query="shoelase incidnt", fuzzy=true)    tolerates typos
+```
+
+Exact search is FTS5 with BM25 ranking, and falls back to fuzzy when a term finds nothing. Fuzzy gathers candidates from a trigram index, then ranks them by edit distance. No embeddings, no external service.
 
 ## Scheduled jobs
 
-The agent creates its own jobs at runtime; nothing is declared in config.
+The agent schedules itself; nothing is declared in config.
 
 ```
 cron_create(name="hn", schedule="0 7 * * *", prompt="post the top Hacker News stories")
 ```
 
-Jobs live in SQLite and a reconcile loop picks them up within a minute. A firing job runs its prompt as a turn and posts the result once. One delivery path, so a digest cannot arrive twice.
+Jobs live in SQLite and a reconcile loop picks up changes within a minute. A firing job runs its prompt as a turn and posts the result once.
 
 ## Code execution
 
@@ -63,18 +82,16 @@ Jobs live in SQLite and a reconcile loop picks them up within a minute. A firing
 sudo -u merlin-exec merlin-sandbox python   # source on stdin
 ```
 
-The wrapper is the only thing merlin may reach through sudo, and it drops to a user with no files. Inside, bubblewrap unshares every namespace except the network:
+bubblewrap unshares every namespace except the network:
 
 - host filesystem invisible except `/nix/store` and a scratch tmpfs
-- no path to the memory database, the cron store, or the environment file
-- RFC1918, loopback and link-local denied by owner-matched iptables rules
+- no path to the databases or the environment file
+- RFC1918, loopback and link-local denied by owner-matched firewall rules
 - hard kill on timeout
 
-Network is on so a script can fetch its own data. That also means executed code reaches the internet from your address.
+Network is on so scripts can fetch their own data, which also means generated code reaches the internet from your address.
 
 ## Configuration
-
-Secrets never appear in the config file. It is rendered world-readable into the Nix store.
 
 ```toml
 homeserver   = "https://matrix.example.org"
@@ -83,7 +100,7 @@ display_name = "merlin"
 
 allowed_rooms   = ["!room:matrix.example.org"]
 allowed_senders = ["@you:matrix.example.org"]
-context_window  = 40
+context_window  = 64
 
 [model]
 chat  = "z-ai/glm-5.3-flash"
@@ -91,11 +108,11 @@ image = "meta/muse-image"
 
 [limits]
 max_response_bytes = 8388608
-tool_iterations    = 6
+tool_iterations    = 16
 exec_timeout_s     = 60
 ```
 
-From the environment: `MATRIX_PASSWORD`, `OPENROUTER_API_KEY`, `EXA_API_KEY`, optionally `MATRIX_RECOVERY_PASSPHRASE`. `MERLIN_ALLOWED_ROOMS` and `MERLIN_ALLOWED_SENDERS` override the file when the identifiers should not be published either.
+Credentials come from the environment, never the file: `MATRIX_PASSWORD`, `OPENROUTER_API_KEY`, `EXA_API_KEY`, optionally `MATRIX_RECOVERY_PASSPHRASE`. `MERLIN_ALLOWED_ROOMS` and `MERLIN_ALLOWED_SENDERS` override the file.
 
 The persona is a `SOUL.md` beside the config, injected on every turn.
 
@@ -104,12 +121,6 @@ The persona is a `SOUL.md` beside the config, injected on every turn.
 ```sh
 cargo build --release
 merlin --config ./config.toml
-```
-
-Import memories from another SQLite table with `id`, `key`, `content`, `category`, `created_at`:
-
-```sh
-merlin --config ./config.toml --import-memories /path/to/old.db
 ```
 
 On NixOS:
@@ -123,16 +134,14 @@ services.merlin = {
 };
 ```
 
-## Notes on the dependency tree
+Import memories from another SQLite table with `id`, `key`, `content`, `category`, `created_at`:
 
-`matrix-sdk` pins `reqwest` and `rusqlite`, and selects reqwest's `rustls` feature, which pulls `aws-lc-rs`. Cargo unifies features, so none of these can be overridden downstream. Matching its versions avoids compiling a second TLS stack and a second SQLite.
-
-`libsqlite3-sys` declares `links = "sqlite3"`, so exactly one copy may exist in the graph.
+```sh
+merlin --config ./config.toml --import-memories /path/to/old.db
+```
 
 ## Tests
 
 ```sh
 cargo test
 ```
-
-34 tests, covering addressing, the ambient ring buffer, FTS recall and upsert, cron expression handling, the tool schemas, prompt assembly, and sandbox timeout behaviour.
