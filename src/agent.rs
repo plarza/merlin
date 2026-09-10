@@ -1,0 +1,158 @@
+//! The turn loop: prompt, tool calls, reply.
+
+use anyhow::Result;
+use std::sync::Arc;
+
+use crate::llm::{Llm, Message};
+use crate::tools::{Outcome, Tools, definitions};
+
+pub struct Agent {
+    pub llm: Arc<Llm>,
+    pub tools: Arc<Tools>,
+    pub soul: String,
+    pub max_iterations: usize,
+}
+
+#[derive(Default)]
+pub struct TurnResult {
+    pub text: String,
+    pub images: Vec<Image>,
+}
+
+pub struct Image {
+    pub bytes: Vec<u8>,
+    pub media_type: String,
+    pub caption: String,
+}
+
+/// Context for one inbound message.
+pub struct Incoming<'a> {
+    pub room_id: &'a str,
+    pub sender: &'a str,
+    pub body: &'a str,
+    /// Ambient messages seen but not answered, oldest first.
+    pub ambient: Option<String>,
+    /// Text of the message being replied to, when this is a reply. The previous
+    /// bot fetched a reply's parent only for media and dropped the words, so
+    /// replying to a message with just the bot's name arrived blank.
+    pub reply_parent: Option<String>,
+}
+
+impl Agent {
+    pub async fn turn(&self, incoming: Incoming<'_>) -> Result<TurnResult> {
+        let mut messages = vec![Message::system(system_prompt(&self.soul, &incoming))];
+        messages.push(Message::user(format!(
+            "{}: {}",
+            incoming.sender, incoming.body
+        )));
+
+        let tool_defs = definitions();
+        let mut result = TurnResult::default();
+
+        for _ in 0..self.max_iterations {
+            let reply = self.llm.chat(&messages, &tool_defs).await?;
+
+            if reply.tool_calls.is_empty() {
+                result.text = reply.content.unwrap_or_default().trim().to_string();
+                return Ok(result);
+            }
+
+            // Echo the assistant's tool-call message back before the results,
+            // or the next request is malformed.
+            messages.push(reply.clone());
+
+            for call in &reply.tool_calls {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
+                    .unwrap_or_else(|_| serde_json::json!({}));
+
+                let outcome = self
+                    .tools
+                    .dispatch(&call.function.name, &args, incoming.room_id)
+                    .await;
+
+                messages.push(Message::tool_result(&call.id, outcome.for_model()));
+
+                if let Outcome::Image {
+                    bytes,
+                    media_type,
+                    caption,
+                } = outcome
+                {
+                    result.images.push(Image {
+                        bytes,
+                        media_type,
+                        caption,
+                    });
+                }
+            }
+        }
+
+        // Out of iterations with tools still pending: say so rather than going
+        // silent, and keep any images already produced.
+        result.text = "I ran out of tool steps on that one. Ask again and I'll narrow it down."
+            .to_string();
+        Ok(result)
+    }
+
+}
+
+/// Assemble the system prompt. Free-standing so it can be tested without
+/// constructing an LLM client or a tool registry.
+fn system_prompt(soul: &str, incoming: &Incoming<'_>) -> String {
+    let mut prompt = soul.to_string();
+
+    if let Some(parent) = &incoming.reply_parent {
+        prompt.push_str(&format!("\n\n## the message being replied to\n\n{parent}\n"));
+    }
+
+    if let Some(ambient) = &incoming.ambient {
+        prompt.push_str(&format!(
+            "\n\n## recent room conversation\n\n\
+             Messages you were not addressed in, for context. Do not reply to them.\n\n{ambient}\n"
+        ));
+    }
+
+    prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn incoming<'a>(ambient: Option<&'a str>, parent: Option<&'a str>) -> Incoming<'a> {
+        Incoming {
+            room_id: "!r:example.org",
+            sender: "@aiden:example.org",
+            body: "merlin hello",
+            ambient: ambient.map(str::to_string),
+            reply_parent: parent.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn prompt_is_just_the_soul_when_there_is_no_context() {
+        assert_eq!(system_prompt("you are merlin", &incoming(None, None)), "you are merlin");
+    }
+
+    #[test]
+    fn ambient_context_is_labelled_as_not_for_reply() {
+        let p = system_prompt("soul", &incoming(Some("@jakob: yo"), None));
+        assert!(p.contains("recent room conversation"));
+        assert!(p.contains("Do not reply to them"));
+        assert!(p.contains("@jakob: yo"));
+    }
+
+    #[test]
+    fn reply_parent_is_included() {
+        let p = system_prompt("soul", &incoming(None, Some("add a memory to not do that")));
+        assert!(p.contains("message being replied to"));
+        assert!(p.contains("add a memory to not do that"));
+    }
+
+    #[test]
+    fn both_context_blocks_coexist() {
+        let p = system_prompt("soul", &incoming(Some("@jakob: yo"), Some("parent text")));
+        assert!(p.contains("parent text") && p.contains("@jakob: yo"));
+        assert!(p.starts_with("soul"));
+    }
+}

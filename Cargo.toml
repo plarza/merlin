@@ -1,0 +1,49 @@
+[package]
+name = "merlin"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Matrix + E2EE. mxlink wraps matrix-sdk and owns login, session persistence,
+# key backup and cross-signing — the parts that are genuinely hard to get right.
+mxlink = "1.15"
+
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal", "time", "process"] }
+anyhow = "1.0.104"
+
+# Memory and cron stores. Bundled so there is no system sqlite to match, with
+# FTS5 for keyword recall.
+#
+# Held at 0.37 to match matrix-sdk's crypto store, not by preference: 0.40 is
+# current, but libsqlite3-sys declares links = "sqlite3", so exactly one copy
+# may exist in the graph and matrix-sdk got there first.
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+# OpenRouter, Exa, web_fetch, http_request.
+#
+# Version and features deliberately match what matrix-sdk 0.18 selects. It
+# hardcodes reqwest 0.13 with "rustls" and offers no way to opt out, so picking
+# anything else builds a second, duplicate TLS stack. That feature also pulls
+# aws-lc-rs — not our choice, and not removable while matrix-sdk forces it.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1"
+
+chrono = { version = "0.4.45", features = ["serde"] }
+chrono-tz = "0.10.4"
+tokio-cron-scheduler = "0.15.1"
+
+# Derives the 32-byte session encryption key from the Matrix password, so
+# there is no separate secret to provision. Version matches the copy
+# matrix-sdk already pulls in, to avoid a duplicate.
+sha2 = "0.10"
+
+base64 = "0.23"
+uuid = { version = "1.26", features = ["v4"] }
+regex = "1.13"
+html2text = "0.17"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,0 +1,145 @@
+//! merlin — a Matrix assistant.
+
+mod agent;
+mod config;
+mod cron;
+mod exec;
+mod llm;
+mod matrix;
+mod memory;
+mod room;
+mod scheduler;
+mod tools;
+
+use anyhow::{Context, Result};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use agent::Agent;
+use config::{Config, Secrets};
+use cron::CronStore;
+use exec::Sandbox;
+use llm::Llm;
+use matrix::Bot;
+use memory::Memory;
+use room::Buffers;
+use tools::Tools;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "merlin=info,warn".into()),
+        )
+        .init();
+
+    let mut args = std::env::args().skip(1);
+    let mut config_path = PathBuf::from("/var/lib/merlin/config.toml");
+    let mut import_from: Option<PathBuf> = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => config_path = args.next().context("--config needs a path")?.into(),
+            "--import-memories" => {
+                import_from = Some(args.next().context("--import-memories needs a path")?.into())
+            }
+            other => anyhow::bail!("unknown argument '{other}'"),
+        }
+    }
+
+    let config = Arc::new(Config::load(&config_path)?);
+    let memory_path = config.state_dir.join("memory.db");
+
+    // Import is a one-shot maintenance mode, not part of startup: it runs
+    // against the same schema the bot uses and then exits, so the result can be
+    // verified before anything goes live.
+    if let Some(legacy) = import_from {
+        let mut memory = Memory::open(&memory_path)?;
+        let before = memory.count()?;
+        let taken = memory.import_legacy(&legacy)?;
+        let after = memory.count()?;
+        println!("imported {taken} rows ({before} -> {after} total)");
+        return Ok(());
+    }
+
+    let secrets = Secrets::from_env()?;
+
+    let soul = std::fs::read_to_string(config.state_dir.join("SOUL.md")).unwrap_or_else(|_| {
+        tracing::warn!("no SOUL.md found; running without a persona");
+        String::new()
+    });
+
+    let memory = Arc::new(Mutex::new(Memory::open(&memory_path)?));
+    tracing::info!(count = memory.lock().unwrap().count()?, "memory ready");
+
+    let cron_store = Arc::new(Mutex::new(CronStore::open(
+        &config.state_dir.join("cron.db"),
+    )?));
+
+    let llm = Arc::new(Llm::new(
+        secrets.openrouter_api_key.clone(),
+        config.model.chat.clone(),
+        config.model.image.clone(),
+        config.limits.request_timeout_s,
+    )?);
+
+    let sandbox = Arc::new(Sandbox::new(
+        exec_runner(),
+        config.limits.exec_timeout_s,
+        config.limits.exec_memory_max.clone(),
+    ));
+
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(
+            config.limits.request_timeout_s,
+        ))
+        .build()?;
+
+    let tools = Arc::new(Tools {
+        memory: Arc::clone(&memory),
+        cron: Arc::clone(&cron_store),
+        sandbox,
+        llm: Arc::clone(&llm),
+        http,
+        exa_key: secrets.exa_api_key.clone(),
+        config: Arc::clone(&config),
+    });
+
+    let agent = Arc::new(Agent {
+        llm,
+        tools,
+        soul,
+        max_iterations: config.limits.tool_iterations,
+    });
+
+    let link = matrix::connect(&config, &secrets).await?;
+    tracing::info!(user = %config.user_id, "connected");
+
+    let bot = Arc::new(Bot {
+        link,
+        agent: Arc::clone(&agent),
+        buffers: Arc::new(Buffers::new(config.context_window)),
+        config: Arc::clone(&config),
+    });
+
+    // Started before sync so a job due at boot is not missed.
+    scheduler::start(Arc::clone(&cron_store), agent, Arc::clone(&bot)).await?;
+
+    bot.run().await
+}
+
+/// How `run_code` reaches the sandbox. Overridable so the bot can run outside
+/// NixOS, where the production wrapper does not exist.
+fn exec_runner() -> Vec<String> {
+    match std::env::var("MERLIN_EXEC_RUNNER") {
+        Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(str::to_string).collect(),
+        _ => vec![
+            "sudo".into(),
+            "-n".into(),
+            "-u".into(),
+            "merlin-exec".into(),
+            "/run/current-system/sw/bin/merlin-sandbox".into(),
+        ],
+    }
+}
