@@ -1,6 +1,6 @@
 <div align="center">
 <img src="docs/merlin.jpg" alt="" width="220">
-
+<br>
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/title-dark.svg">
   <img src="docs/title-light.svg" alt="merlin" width="300">
@@ -19,14 +19,22 @@
 | `memory_store` | `key`, `content`, `category` |
 | `memory_forget` | `key` |
 | `search_messages` | `query`, `limit` |
+| `send_message` | `text` |
+| `read_file` | `path`, `offset`, `limit` |
+| `write_file` | `path`, `content` |
+| `edit_file` | `path`, `edits` |
+| `list_files` | `path` |
+| `grep_files` | `pattern`, `path` |
+| `run_code` | `language`, `source` |
 | `web_search` | `query`, `num_results` |
 | `web_fetch` | `url` |
-| `http_request` | `method`, `url`, `headers`, `body` |
 | `generate_image` | `prompt`, `model` |
-| `run_code` | `language`, `source` |
 | `cron_create` | `name`, `schedule`, `prompt`, `timezone` |
 | `cron_list`, `cron_delete` | `name` |
-| `time_now` | `timezone` |
+
+there is no HTTP tool and no clock tool. the sandbox has curl, and the current time is in the system prompt, so neither earns a line in every prompt.
+
+`send_message` posts to the room mid-turn without ending it, so a long task reports progress instead of going quiet. the final answer is still sent automatically.
 
 ## storage
 
@@ -66,16 +74,23 @@ cron_create(name="hn", schedule="0 7 * * *", prompt="post the top Hacker News st
 
 schedules are ordinary 5-field cron expressions with an IANA timezone, validated at creation. a reconcile loop picks up additions, edits and deletions within a minute. a firing job runs its prompt as a turn and posts the result to its room once.
 
-## code execution
+## sandbox
 
-`run_code` accepts Python or bash. source is passed on stdin to a wrapper reached through `sudo -u merlin-exec`, a user that owns no files. the wrapper runs bubblewrap with every namespace unshared except the network:
+`run_code` runs bash or python inside a persistent Alpine root, reached through `sudo -u merlin-exec`, a user that owns no files.
 
-- host filesystem invisible apart from `/nix/store` and a scratch tmpfs
-- no path to the databases or the environment file
-- RFC1918, loopback and link-local rejected by firewall rules matched on that uid
-- killed at `exec_timeout_s`
+the agent is **root inside its own root filesystem** and nothing else. `apk add`, `pip install` and `npm i` all work, and what it installs is still there next turn. that is the point: it can set up whatever it needs without anyone provisioning it.
 
-network access is deliberate, so scripts can fetch their own data. generated code therefore reaches the internet from the host's address.
+it is root through a user namespace, so outside the namespace the kernel sees an unprivileged uid. bubblewrap unshares every namespace except the network:
+
+- no host path is bound in at all, so `/nix/store`, `/var/lib/merlin` and `/run/secrets` are not merely unreadable, they do not exist in there
+- `--cap-drop ALL`, so mounting is refused even as root
+- only the safe `/dev` nodes; no block devices
+- RFC1918, loopback and link-local rejected by firewall rules matched on that uid, over both IPv4 and IPv6
+- `ulimit` on processes and file size, and killed at `exec_timeout_s`
+
+the sandbox resolves DNS through public resolvers rather than the host's, because the host's nameserver is a LAN address and the LAN is exactly what it is denied.
+
+the workspace is the one thing shared with the bot. it is a separate directory, group-owned and setgid, mounted at `/work` and the shell's starting directory, so `write_file` then `run_code` see the same tree. the sandbox's own operating system stays private to the sandbox uid.
 
 ## configuration
 
@@ -91,13 +106,14 @@ timezone        = "Australia/Sydney"
 
 [model]
 chat       = "z-ai/glm-5.3-flash"
+reasoning_effort = "low"
 image      = "meta/muse-image"
 embedding  = "google/gemini-embedding-001"
 embedding_dimensions = 768
 
 [limits]
 max_response_bytes = 8388608
-tool_iterations    = 16
+tool_iterations    = 32
 request_timeout_s  = 120
 exec_timeout_s     = 60
 exec_memory_max    = "1G"
