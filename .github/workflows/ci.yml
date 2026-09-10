@@ -59,20 +59,25 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # Pushing the closure is what turns a deploy into a download. Without a
-      # token the build still runs, it just is not shared.
-      - uses: cachix/cachix-action@v16
-        if: env.HAVE_TOKEN == 'yes'
-        with:
-          name: ${{ env.CACHE_NAME }}
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          # The runner publishes to the cache but never reads from it, and
-          # `cachix use` needs a read authorization this push token does not
-          # carry. Skipping it keeps the push working.
-          skipAddingSubstituter: true
+      - name: install cachix
+        run: nix profile install nixpkgs#cachix
 
       - run: nix build .#merlin --print-build-logs
       - run: nix build .#merlin-sandbox --print-build-logs
+
+      # Pushed explicitly rather than through cachix-action. The action always
+      # runs `cachix use` first, which needs a read authorization this push
+      # token does not carry, and skipping that step leaves its post-build hook
+      # pointing at a daemon that was never started.
+      - name: publish the closure
+        if: env.HAVE_TOKEN == 'yes'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          nix build .#merlin --no-link --print-out-paths | cachix push "$CACHE_NAME"
+          nix build .#merlin-sandbox --no-link --print-out-paths | cachix push "$CACHE_NAME"
+          nix build .#sandbox-rootfs --no-link --print-out-paths | cachix push "$CACHE_NAME"
 
       # Ubuntu 24.04 runners restrict unprivileged user namespaces through
       # AppArmor, which is exactly what bubblewrap needs. Without this the
