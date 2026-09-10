@@ -5,13 +5,13 @@
 *meta ai for matrix*
 </div>
 
-a single-binary ai agent for Matrix. about 2,200 lines of Rust, one config file, no plugin system.
+a single-binary ai agent for Matrix. about 2,800 lines of Rust, one config file, no plugin system.
 
 ```
-merlin what did the s&p do this week   searches, answers
-merlin remember jakob hates mondays    stores it, recalls it later
-merlin backtest this on 5y of AAPL     writes Python, runs it sandboxed
-merlin post the HN top 5 at 7am daily  schedules itself
+merlin what did the s&p do this week    searches, answers
+merlin remember the wifi password       stores it, recalls it later
+merlin backtest this on 5y of AAPL      writes Python, runs it sandboxed
+merlin post the HN top 5 at 7am daily   schedules itself
 ```
 
 ## how it works
@@ -37,7 +37,7 @@ name matching is word-boundary, so the bird and the wizard do not wake it. reply
 | `memory_recall` | `query`, `limit` |
 | `memory_store` | `key`, `content`, `category` |
 | `memory_forget` | `key` |
-| `search_messages` | `query`, `limit`, `fuzzy` |
+| `search_messages` | `query`, `limit` |
 | `web_search` | `query`, `num_results` |
 | `web_fetch` | `url` |
 | `http_request` | `method`, `url`, `headers`, `body` |
@@ -53,12 +53,15 @@ there are no approval prompts. the sender allowlist is the only gate.
 
 two separate stores. memory holds notes the agent decided to keep. history holds every message anyone sent.
 
+queries work like a search engine. bare words match approximately, and a quoted word has to be there.
+
 ```
-search_messages(query="shoelace incident")
-search_messages(query="shoelase incidnt", fuzzy=true)
+invoce                       fuzzy, finds "invoice"
+"invoice"                    exact, nothing else
+world cup "2025"             loose on world cup, 2025 required
 ```
 
-exact search is FTS5 ranked by BM25, and falls back to fuzzy when a term finds nothing. fuzzy pulls candidates from a trigram index and ranks them by Levenshtein distance. trigram MATCH on its own wants every trigram of the query present, which a typo breaks, so the ranking pass is what makes misspellings work. no embeddings involved.
+quoted terms select the candidate set through the standard FTS5 index, then the loose terms rank it by Jaro-Winkler similarity from rapidfuzz. with nothing quoted, candidates come from a trigram index instead. trigram MATCH alone wants every trigram of the query present, which a typo breaks, so the ranking pass is what makes misspellings work. no embeddings involved.
 
 ## scheduling
 
