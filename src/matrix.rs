@@ -24,6 +24,7 @@ pub struct Bot {
     pub link: MatrixLink,
     pub agent: Arc<Agent>,
     pub buffers: Arc<Buffers>,
+    pub archive: Arc<std::sync::Mutex<crate::messages::Archive>>,
     pub config: Arc<Config>,
 }
 
@@ -116,6 +117,22 @@ impl Bot {
                 body: body.clone(),
             },
         );
+
+        // Archived unconditionally, so history is searchable whether or not
+        // the bot was addressed.
+        {
+            let at = chrono::Utc::now().to_rfc3339();
+            let archive = self.archive.lock().unwrap();
+            if let Err(e) = archive.record(
+                event.event_id.as_str(),
+                &room_id,
+                &sender,
+                &body,
+                &at,
+            ) {
+                tracing::warn!(error = %e, "failed archiving message");
+            }
+        }
 
         let mentions: Vec<String> = event
             .content

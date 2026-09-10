@@ -7,6 +7,7 @@ mod exec;
 mod llm;
 mod matrix;
 mod memory;
+mod messages;
 mod room;
 mod scheduler;
 mod tools;
@@ -22,6 +23,7 @@ use exec::Sandbox;
 use llm::Llm;
 use matrix::Bot;
 use memory::Memory;
+use messages::Archive;
 use room::Buffers;
 use tools::Tools;
 
@@ -73,6 +75,11 @@ async fn main() -> Result<()> {
     let memory = Arc::new(Mutex::new(Memory::open(&memory_path)?));
     tracing::info!(count = memory.lock().unwrap().count()?, "memory ready");
 
+    let archive = Arc::new(Mutex::new(Archive::open(
+        &config.state_dir.join("messages.db"),
+    )?));
+    tracing::info!(count = archive.lock().unwrap().count()?, "archive ready");
+
     let cron_store = Arc::new(Mutex::new(CronStore::open(
         &config.state_dir.join("cron.db"),
     )?));
@@ -98,6 +105,7 @@ async fn main() -> Result<()> {
 
     let tools = Arc::new(Tools {
         memory: Arc::clone(&memory),
+        archive: Arc::clone(&archive),
         cron: Arc::clone(&cron_store),
         sandbox,
         llm: Arc::clone(&llm),
@@ -120,6 +128,7 @@ async fn main() -> Result<()> {
         link,
         agent: Arc::clone(&agent),
         buffers: Arc::new(Buffers::new(config.context_window)),
+        archive: Arc::clone(&archive),
         config: Arc::clone(&config),
     });
 
