@@ -1,6 +1,7 @@
 //! merlin — a Matrix assistant.
 
 mod agent;
+mod backfill;
 mod config;
 mod cron;
 mod exec;
@@ -39,12 +40,17 @@ async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mut config_path = PathBuf::from("/var/lib/merlin/config.toml");
     let mut import_from: Option<PathBuf> = None;
+    let mut backfill_pages: Option<usize> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config" => config_path = args.next().context("--config needs a path")?.into(),
             "--import-memories" => {
                 import_from = Some(args.next().context("--import-memories needs a path")?.into())
+            }
+            "--backfill" => {
+                let pages = args.next().unwrap_or_else(|| "50".into());
+                backfill_pages = Some(pages.parse().context("--backfill needs a page count")?);
             }
             other => anyhow::bail!("unknown argument '{other}'"),
         }
@@ -123,6 +129,22 @@ async fn main() -> Result<()> {
 
     let link = matrix::connect(&config, &secrets).await?;
     tracing::info!(user = %config.user_id, "connected");
+
+    if let Some(pages) = backfill_pages {
+        // Sync once so the client has joined rooms and whatever keys the
+        // server will hand over before we start reading history.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let stats = backfill::run(&link, &config, &archive, pages).await?;
+        println!("backfill: {stats}");
+        if stats.undecryptable > stats.archived {
+            println!(
+                "most events could not be decrypted: this device has no room keys for them. \
+                 Set up Secure Backup on the account and provide MATRIX_RECOVERY_PASSPHRASE, \
+                 or share keys to this device from a session that has them."
+            );
+        }
+        return Ok(());
+    }
 
     let bot = Arc::new(Bot {
         link,
