@@ -154,10 +154,34 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Refill the ambient buffer from the archive, so a restart does not leave the bot blind to what was just said.
+    let buffers = Arc::new(Buffers::new(config.context_window));
+    {
+        let archive = archive.lock().unwrap();
+        for room_id in &config.allowed_rooms {
+            match archive.recent(room_id, config.context_window) {
+                Ok(rows) => {
+                    let seeded = rows.len();
+                    for row in rows {
+                        buffers.push(
+                            room_id,
+                            merlin::room::Turn {
+                                sender: row.sender,
+                                body: row.body,
+                            },
+                        );
+                    }
+                    tracing::info!(room = %room_id, seeded, "context restored");
+                }
+                Err(e) => tracing::warn!(room = %room_id, error = %e, "could not restore context"),
+            }
+        }
+    }
+
     let bot = Arc::new(Bot {
         link,
         agent: Arc::clone(&agent),
-        buffers: Arc::new(Buffers::new(config.context_window)),
+        buffers,
         archive: Arc::clone(&archive),
         config: Arc::clone(&config),
     });

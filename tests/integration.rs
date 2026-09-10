@@ -135,6 +135,18 @@ fn search_rejects_nothing_and_finds_nothing_for_unrelated_queries() {
 }
 
 #[test]
+fn recent_returns_the_newest_messages_oldest_first() {
+    let dir = scratch("recent");
+    let a = seeded_archive(&dir);
+    let rows = a.recent("!r:example.org", 2).unwrap();
+    assert_eq!(rows.len(), 2);
+    // Ordering matters: the buffer is rebuilt from this and reads as conversation.
+    assert!(rows[0].at <= rows[1].at);
+    // A room with nothing in it restores nothing rather than failing.
+    assert!(a.recent("!empty:example.org", 5).unwrap().is_empty());
+}
+
+#[test]
 fn an_event_is_archived_once_however_often_sync_replays_it() {
     let dir = scratch("dupes");
     let a = seeded_archive(&dir);

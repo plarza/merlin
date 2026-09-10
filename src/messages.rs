@@ -83,6 +83,27 @@ impl Archive {
         Ok(())
     }
 
+    /// The newest messages in a room, oldest first.
+    /// Used to refill the ambient buffer after a restart, which would otherwise leave the bot with no idea what was just being discussed.
+    pub fn recent(&self, room_id: &str, limit: usize) -> Result<Vec<Archived>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sender, body, at FROM (
+               SELECT sender, body, at FROM messages
+               WHERE room_id = ?1 ORDER BY at DESC LIMIT ?2
+             ) ORDER BY at ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![room_id, limit as i64], |r| {
+                Ok(Archived {
+                    sender: r.get(0)?,
+                    body: r.get(1)?,
+                    at: r.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn count(&self) -> Result<i64> {
         Ok(self
             .conn
