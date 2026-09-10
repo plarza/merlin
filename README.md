@@ -2,18 +2,8 @@
 <img src="docs/merlin.jpg" alt="merlin" width="240">
 
 # merlin
-*meta ai for matrix*
+*a pico openclaw for matrix*
 </div>
-
-an ai agent for Matrix. one binary, one config file, about 2,800 lines of Rust.
-
-## behaviour
-
-every message in an allowed room is buffered and archived. a turn runs only when an allowed sender addresses the bot, so ordinary conversation costs nothing.
-
-a message addresses the bot when it carries an `m.mentions` pill for it, contains its display name or localpart as a whole word, or replies to one of the bot's own messages. a reply passes the parent message text to the model. replies are sent as plain text in the main timeline, with no `formatted_body` and no threading.
-
-the ambient buffer holds the last `context_window` messages per room and is refilled from the archive at startup.
 
 ## tools
 
@@ -32,8 +22,6 @@ the ambient buffer holds the last `context_window` messages per room and is refi
 | `cron_list`, `cron_delete` | `name` |
 | `time_now` | `timezone` |
 
-dispatched in a loop capped at `tool_iterations` rounds per turn. on reaching the cap the model is called once more with tools withheld, so the turn answers from what it found rather than reporting the limit. there are no approval prompts; `allowed_senders` is the only gate.
-
 ## storage
 
 three SQLite databases under the state directory.
@@ -46,8 +34,6 @@ three SQLite databases under the state directory.
 
 ## search
 
-`search_messages` takes a query where bare words match approximately and double-quoted words are required exactly.
-
 ```
 invoce                       fuzzy, matches "invoice"
 "invoice"                    exact only
@@ -57,8 +43,6 @@ world cup "2025"             loose on world cup, 2025 required
 quoted terms select the candidate set through the default FTS5 index, ranked by BM25. loose terms then rank that set by Jaro-Winkler similarity from rapidfuzz, keeping scores above 0.82. with nothing quoted, candidates come from the trigram index instead. trigram `MATCH` requires every trigram of the query to be present and so cannot match through a typo alone, which is what the ranking pass is for. an exact search that returns nothing falls back to fuzzy. no embeddings.
 
 ## scheduling
-
-`cron_create` writes a job to SQLite at runtime; nothing is declared in config.
 
 ```
 cron_create(name="hn", schedule="0 7 * * *", prompt="post the top Hacker News stories")
@@ -76,14 +60,6 @@ schedules are ordinary 5-field cron expressions with an IANA timezone, validated
 - killed at `exec_timeout_s`
 
 network access is deliberate, so scripts can fetch their own data. generated code therefore reaches the internet from the host's address.
-
-## model
-
-OpenRouter for both text and images, over two endpoints.
-
-chat uses `/chat/completions` with function calling and `stream: true`. streaming is required rather than cosmetic: an unstreamed request sends nothing until it completes, which makes a long generation indistinguishable from a stall and trips a total timeout. streaming allows an idle timeout instead, so a long task cannot fail merely for being long. tool calls are reassembled from deltas, and token counts come back through `stream_options`.
-
-images use `/images`, a separate endpoint. image models do not appear in the chat model list and return 404 from `/chat/completions`. the response is base64 with a media type, uploaded to the Matrix media repository and sent as `m.image`.
 
 ## configuration
 
@@ -156,10 +132,6 @@ services.merlin = {
 ```
 
 the module creates the `merlin` and `merlin-exec` users, a `0700` state directory, the sudo rule for the sandbox, and the firewall rules denying it LAN access.
-
-## dependencies
-
-matrix-sdk pins `reqwest` and `rusqlite`, and selects reqwest's `rustls` feature, which pulls `aws-lc-rs`. cargo unifies features, so none of these can be overridden downstream. matching its versions avoids compiling a second TLS stack, and `libsqlite3-sys` declares `links = "sqlite3"`, so only one copy may exist in the graph at all. upgrading `rusqlite` past matrix-sdk's version does not compile.
 
 ## tests
 
