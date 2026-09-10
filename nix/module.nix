@@ -111,7 +111,7 @@ in
     '';
 
     systemd.tmpfiles.rules = [
-      "d ${cfg.stateDir} 0750 merlin merlin -"
+      "d ${cfg.stateDir} 0700 merlin merlin -"
       "L+ ${cfg.stateDir}/SOUL.md - - - - ${pkgs.writeText "merlin-soul" cfg.soul}"
       "L+ ${cfg.stateDir}/config.toml - - - - ${configFile}"
     ];
@@ -127,6 +127,11 @@ in
         User = "merlin";
         Group = "merlin";
         StateDirectory = "merlin";
+        # StateDirectory defaults to 0755 and overrides the tmpfiles mode, which
+        # left the message archive and memory readable by every user on the
+        # host. UMask covers files the process creates afterwards.
+        StateDirectoryMode = "0700";
+        UMask = "0077";
         WorkingDirectory = cfg.stateDir;
         EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
         Restart = "on-failure";
