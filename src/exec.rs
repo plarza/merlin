@@ -1,13 +1,9 @@
 //! Sandboxed code execution.
 //!
-//! Runs as a distinct `merlin-exec` uid rather than the bot's own,
-//! for two reasons: that user cannot read `/var/lib/merlin` (the memory database,
-//! the cron store) or the EnvironmentFile holding every API key,
-//! and a separate uid is something the firewall can match on,
-//! which is how LAN egress gets denied while public internet stays reachable.
+//! Runs as a distinct `merlin-exec` uid rather than the bot's own, for two reasons: that user cannot read `/var/lib/merlin` (the memory database,
+//! the cron store) or the EnvironmentFile holding every API key, and a separate uid is something the firewall can match on, which is how LAN egress gets denied while public internet stays reachable.
 //!
-//! The privilege step is `sudo -u merlin-exec <wrapper>`: sudo to an unprivileged user,
-//! restricted to a single binary.
+//! The privilege step is `sudo -u merlin-exec <wrapper>`: sudo to an unprivileged user, restricted to a single binary.
 
 use anyhow::{Context, Result};
 use std::process::Stdio;
@@ -16,20 +12,14 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 pub struct Sandbox {
-    /// Command prefix,
-    /// e.g.
-    /// `["sudo",
-    /// "-u",
-    /// "merlin-exec",
-    /// "/…/merlin-sandbox"]`.
+    /// Command prefix, e.g.
+    /// `["sudo", "-u", "merlin-exec", "/…/merlin-sandbox"]`.
     /// Configurable so tests and local runs can execute directly.
     runner: Vec<String>,
     timeout: Duration,
     max_output: usize,
-    /// Passed to the wrapper,
-    /// which owns the cgroup limit.
-    /// Enforcing it here would be advisory only,
-    /// since the child is a different user.
+    /// Passed to the wrapper, which owns the cgroup limit.
+    /// Enforcing it here would be advisory only, since the child is a different user.
     memory_max: String,
 }
 
@@ -74,8 +64,7 @@ impl Sandbox {
             .spawn()
             .with_context(|| format!("spawning sandbox via {program}"))?;
 
-        // Source arrives on stdin rather than as a temp file,
-        // so nothing the agent writes ever lands on a filesystem the bot user can see.
+        // Source arrives on stdin rather than as a temp file, so nothing the agent writes ever lands on a filesystem the bot user can see.
         if let Some(mut sink) = child.stdin.take() {
             let payload = match stdin {
                 Some(extra) => format!("{source}\n\u{0}{extra}"),

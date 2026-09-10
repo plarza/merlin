@@ -14,19 +14,16 @@ pub struct Config {
     pub display_name: String,
 
     /// Canonical room IDs (`!abc:server`).
-    /// Empty means no rooms,
-    /// not all of them: an omitted allowlist must never be a grant.
+    /// Empty means no rooms, not all of them: an omitted allowlist must never be a grant.
     #[serde(default)]
     pub allowed_rooms: Vec<String>,
 
     /// MXIDs permitted to trigger a turn.
-    /// Everyone else is still buffered as ambient context,
-    /// they just cannot address the bot.
+    /// Everyone else is still buffered as ambient context, they just cannot address the bot.
     #[serde(default)]
     pub allowed_senders: Vec<String>,
 
-    /// Ambient messages retained per room,
-    /// in memory only.
+    /// Ambient messages retained per room, in memory only.
     #[serde(default = "default_context_window")]
     pub context_window: usize,
 
@@ -39,8 +36,7 @@ pub struct Config {
     #[serde(default)]
     pub limits: Limits,
 
-    /// Where session,
-    /// memory and cron state live.
+    /// Where session, memory and cron state live.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
 }
@@ -67,8 +63,7 @@ pub struct Limits {
     pub exec_memory_max: String,
 }
 
-/// Credentials,
-/// read from the environment only.
+/// Credentials, read from the environment only.
 #[derive(Clone)]
 pub struct Secrets {
     pub matrix_password: String,
@@ -98,8 +93,7 @@ impl Config {
     }
 
     /// Identifiers can come from the environment instead of the file.
-    /// The config is rendered into the world-readable Nix store from a public repository,
-    /// and a private room's id does not belong there even though it is not a credential.
+    /// The config is rendered into the world-readable Nix store from a public repository, and a private room's id does not belong there even though it is not a credential.
     pub fn apply_env_overrides(&mut self) {
         if let Some(rooms) = list_from_env("MERLIN_ALLOWED_ROOMS") {
             self.allowed_rooms = rooms;
@@ -159,8 +153,7 @@ fn req(key: &str) -> Result<String> {
         })
 }
 
-/// Comma-separated env list,
-/// empty entries dropped.
+/// Comma-separated env list, empty entries dropped.
 fn list_from_env(key: &str) -> Option<Vec<String>> {
     let raw = std::env::var(key).ok()?;
     let items: Vec<String> = raw

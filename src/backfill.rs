@@ -1,11 +1,8 @@
 //! History backfill.
 //!
 //! Pages a room backwards and archives what it can read.
-//! The limit is not pagination,
-//! it is encryption: a device only holds room keys for messages sent after it existed,
-//! or restored from key backup.
-//! Anything older comes back as ciphertext the server cannot help with,
-//! so it is counted and skipped rather than stored as noise.
+//! The limit is not pagination, it is encryption: a device only holds room keys for messages sent after it existed, or restored from key backup.
+//! Anything older comes back as ciphertext the server cannot help with, so it is counted and skipped rather than stored as noise.
 
 use anyhow::{Context, Result};
 use std::sync::Mutex;
@@ -37,8 +34,7 @@ impl std::fmt::Display for Stats {
     }
 }
 
-/// Walk every allowed room backwards,
-/// archiving readable messages.
+/// Walk every allowed room backwards, archiving readable messages.
 pub async fn run(
     link: &MatrixLink,
     config: &Config,

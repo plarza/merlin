@@ -1,7 +1,6 @@
 //! Scheduled jobs.
 //!
-//! A firing job has one output path: run the prompt as a turn,
-//! post the result to its room.
+//! A firing job has one output path: run the prompt as a turn, post the result to its room.
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -14,11 +13,8 @@ use crate::matrix::Bot;
 
 /// Start the scheduler and keep it in step with the store.
 ///
-/// Jobs the agent creates through `cron_create` land in SQLite,
-/// not in this process,
-/// so a reconcile loop picks them up.
-/// Without it a new job would only fire after a restart,
-/// which is not what "schedule this" should mean.
+/// Jobs the agent creates through `cron_create` land in SQLite, not in this process, so a reconcile loop picks them up.
+/// Without it a new job would only fire after a restart, which is not what "schedule this" should mean.
 pub async fn start(store: Arc<Mutex<CronStore>>, agent: Arc<Agent>, bot: Arc<Bot>) -> Result<()> {
     let scheduler = JobScheduler::new()
         .await
@@ -26,10 +22,8 @@ pub async fn start(store: Arc<Mutex<CronStore>>, agent: Arc<Agent>, bot: Arc<Bot
     scheduler.start().await.context("starting scheduler")?;
 
     tokio::spawn(async move {
-        // name -> (uuid,
-        // fingerprint).
-        // The fingerprint catches an edited job,
-        // which must be removed and re-added rather than left on its old cron.
+        // name -> (uuid, fingerprint).
+        // The fingerprint catches an edited job, which must be removed and re-added rather than left on its old cron.
         let mut live: HashMap<String, (uuid::Uuid, String)> = HashMap::new();
 
         loop {
@@ -146,8 +140,7 @@ async fn run_once(job: &Job, agent: &Agent, bot: &Bot) -> Result<()> {
     let result = agent
         .turn(Incoming {
             room_id: &job.room_id,
-            // Marked as the scheduler rather than a person,
-            // so the model does not address the reply to whoever last spoke.
+            // Marked as the scheduler rather than a person, so the model does not address the reply to whoever last spoke.
             sender: "scheduler",
             body: &job.prompt,
             ambient: None,

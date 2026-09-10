@@ -1,5 +1,4 @@
-//! Scheduled jobs,
-//! created by the agent at runtime rather than written into config.
+//! Scheduled jobs, created by the agent at runtime rather than written into config.
 //!
 //! A firing job has one output path: the scheduler runs the prompt and posts the result.
 
@@ -107,9 +106,7 @@ impl CronStore {
 }
 
 impl Job {
-    /// Reject a bad expression at creation time,
-    /// where the agent can correct it,
-    /// rather than at the next restart.
+    /// Reject a bad expression at creation time, where the agent can correct it, rather than at the next restart.
     pub fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty() {
             anyhow::bail!("job name cannot be empty");
@@ -117,8 +114,7 @@ impl Job {
         chrono_tz::Tz::from_str(&self.timezone)
             .map_err(|_| anyhow::anyhow!("unknown timezone '{}'", self.timezone))?;
 
-        // tokio-cron-scheduler wants 6 fields (seconds first); the agent writes ordinary 5-field crontab syntax,
-        // so normalising here keeps the tool surface familiar.
+        // tokio-cron-scheduler wants 6 fields (seconds first); the agent writes ordinary 5-field crontab syntax, so normalising here keeps the tool surface familiar.
         let expr = self.six_field_schedule();
         tokio_cron_scheduler::Job::new_async_tz(expr.as_str(), chrono_tz::UTC, |_uuid, _lock| {
             Box::pin(async {})

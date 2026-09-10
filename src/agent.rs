@@ -1,6 +1,4 @@
-//! The turn loop: prompt,
-//! tool calls,
-//! reply.
+//! The turn loop: prompt, tool calls, reply.
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -32,12 +30,9 @@ pub struct Incoming<'a> {
     pub room_id: &'a str,
     pub sender: &'a str,
     pub body: &'a str,
-    /// Ambient messages seen but not answered,
-    /// oldest first.
+    /// Ambient messages seen but not answered, oldest first.
     pub ambient: Option<String>,
-    /// Text of the message being replied to,
-    /// when this is a reply,
-    /// so a reply carrying only the bot's name still has its subject.
+    /// Text of the message being replied to, when this is a reply, so a reply carrying only the bot's name still has its subject.
     pub reply_parent: Option<String>,
 }
 
@@ -60,8 +55,7 @@ impl Agent {
                 return Ok(result);
             }
 
-            // Echo the assistant's tool-call message back before the results,
-            // or the next request is malformed.
+            // Echo the assistant's tool-call message back before the results, or the next request is malformed.
             messages.push(reply.clone());
 
             for call in &reply.tool_calls {
@@ -91,9 +85,7 @@ impl Agent {
         }
 
         // Out of iterations.
-        // Rather than reporting the limit,
-        // which tells the user nothing,
-        // ask for an answer from what was already gathered.
+        // Rather than reporting the limit, which tells the user nothing, ask for an answer from what was already gathered.
         // Tools are withheld from this call so the model cannot spend another round.
         messages.push(Message::user(
             "You have used all available tool steps. Answer now with what you \

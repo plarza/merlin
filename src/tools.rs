@@ -69,7 +69,7 @@ pub fn definitions() -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "key": { "type": "string", "description": "Short stable identifier, e.g. 'zog' or 'aiden-timezone'" },
+                    "key": { "type": "string", "description": "Short stable identifier, reused to revise an entry, e.g. 'kettle' or 'owner-timezone'" },
                     "content": { "type": "string" },
                     "category": { "type": "string", "enum": ["core", "daily", "conversation"] }
                 },
@@ -206,8 +206,7 @@ impl Tools {
     pub async fn dispatch(&self, name: &str, args: &Value, room_id: &str) -> Outcome {
         match self.run(name, args, room_id).await {
             Ok(outcome) => outcome,
-            // Tool failures are information for the model,
-            // not turn-ending errors: it should be able to try something else or say what broke.
+            // Tool failures are information for the model, not turn-ending errors: it should be able to try something else or say what broke.
             Err(e) => Outcome::Text(format!("Error from {name}: {e}")),
         }
     }
@@ -470,8 +469,7 @@ impl Tools {
     }
 
     /// Shared HTTP path for web_fetch and http_request.
-    /// Errors above the byte cap rather than truncating,
-    /// so a partial body is never mistaken for a whole one.
+    /// Errors above the byte cap rather than truncating, so a partial body is never mistaken for a whole one.
     async fn fetch_capped(
         &self,
         method: reqwest::Method,

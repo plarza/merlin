@@ -54,9 +54,7 @@ async fn main() -> Result<()> {
     let config = Arc::new(Config::load(&config_path)?);
     let memory_path = config.state_dir.join("memory.db");
 
-    // Import is a one-shot maintenance mode,
-    // not part of startup: it runs against the same schema the bot uses and then exits,
-    // so the result can be verified before anything goes live.
+    // Import is a one-shot maintenance mode, not part of startup: it runs against the same schema the bot uses and then exits, so the result can be verified before anything goes live.
     if let Some(legacy) = import_from {
         let mut memory = Memory::open(&memory_path)?;
         let before = memory.count()?;
@@ -171,8 +169,7 @@ async fn main() -> Result<()> {
 }
 
 /// How `run_code` reaches the sandbox.
-/// Overridable so the bot can run outside NixOS,
-/// where the production wrapper does not exist.
+/// Overridable so the bot can run outside NixOS, where the production wrapper does not exist.
 fn exec_runner() -> Vec<String> {
     match std::env::var("MERLIN_EXEC_RUNNER") {
         Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(str::to_string).collect(),

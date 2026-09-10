@@ -1,7 +1,6 @@
 //! Durable memory.
 //!
-//! Flat by design: no agent or tenant foreign key,
-//! so renaming the bot does not orphan its records.
+//! Flat by design: no agent or tenant foreign key, so renaming the bot does not orphan its records.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -93,8 +92,7 @@ impl Memory {
     }
 
     /// BM25 keyword search.
-    /// Falls back to a LIKE scan when the query has no usable FTS tokens,
-    /// so a search for punctuation or a bare id still works.
+    /// Falls back to a LIKE scan when the query has no usable FTS tokens, so a search for punctuation or a bare id still works.
     pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<Record>> {
         let cleaned = sanitize_fts(query);
 
@@ -141,8 +139,7 @@ impl Memory {
             .unwrap_or(0))
     }
 
-    /// One-shot import from a compatible table,
-    /// dropping any `agent_id`.
+    /// One-shot import from a compatible table, dropping any `agent_id`.
     /// Returns how many rows were taken.
     pub fn import_legacy(&mut self, legacy: &Path) -> Result<usize> {
         let src = Connection::open(legacy)
@@ -167,8 +164,7 @@ impl Memory {
         let mut taken = 0usize;
         for (id, key, content, category, created, updated) in rows {
             // The legacy table allows duplicate keys across agents; ours does not.
-            // Skipping a collision keeps the first,
-            // which is the older.
+            // Skipping a collision keeps the first, which is the older.
             let n = tx.execute(
                 "INSERT OR IGNORE INTO memories
                    (id, key, content, category, room_id, created_at, updated_at)
@@ -191,10 +187,8 @@ fn row_to_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
     })
 }
 
-/// FTS5 treats most punctuation as syntax,
-/// so a raw user query can be a syntax error rather than a miss.
-/// Keep alphanumerics,
-/// OR the terms together.
+/// FTS5 treats most punctuation as syntax, so a raw user query can be a syntax error rather than a miss.
+/// Keep alphanumerics, OR the terms together.
 fn sanitize_fts(query: &str) -> String {
     let terms: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric())

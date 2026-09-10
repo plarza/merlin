@@ -2,12 +2,10 @@
 //!
 //! Two FTS5 indexes over the same rows.
 //! The default tokenizer serves exact term search.
-//! Fuzzy search uses the trigram index to gather candidates,
-//! then ranks them by Jaro-Winkler similarity: trigram MATCH requires every trigram of the query to be present,
+//! Fuzzy search uses the trigram index to gather candidates, then ranks them by Jaro-Winkler similarity: trigram MATCH requires every trigram of the query to be present,
 //! so it cannot match through a typo by itself.
 //!
-//! Similarity comes from rapidfuzz,
-//! whose implementations are bit-parallel and carry no dependencies of their own.
+//! Similarity comes from rapidfuzz, whose implementations are bit-parallel and carry no dependencies of their own.
 
 use anyhow::{Context, Result};
 use rapidfuzz::distance::jaro_winkler;
@@ -91,9 +89,7 @@ impl Archive {
             .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?)
     }
 
-    /// Search with Google-style syntax: bare words match approximately,
-    /// quoted words must appear exactly,
-    /// and the two combine.
+    /// Search with Google-style syntax: bare words match approximately, quoted words must appear exactly, and the two combine.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Archived>> {
         let terms = parse_query(query);
         if terms.is_empty() {
@@ -103,8 +99,7 @@ impl Archive {
         let exact: Vec<&Term> = terms.iter().filter(|t| t.exact).collect();
         let loose: Vec<&Term> = terms.iter().filter(|t| !t.exact).collect();
 
-        // Quoted terms are requirements,
-        // so they select the candidate set.
+        // Quoted terms are requirements, so they select the candidate set.
         let candidates = if !exact.is_empty() {
             let expr = exact
                 .iter()
@@ -121,8 +116,7 @@ impl Archive {
             self.trigram_candidates(&loose, limit.saturating_mul(8).max(40))?
         };
 
-        // With nothing loose to rank by,
-        // FTS order already stands.
+        // With nothing loose to rank by, FTS order already stands.
         if loose.is_empty() {
             return Ok(candidates.into_iter().take(limit).collect());
         }
@@ -201,8 +195,7 @@ struct Term {
     exact: bool,
 }
 
-/// Split a query into terms,
-/// treating double-quoted runs as exact.
+/// Split a query into terms, treating double-quoted runs as exact.
 /// An unterminated quote is treated as if it closed at the end.
 fn parse_query(query: &str) -> Vec<Term> {
     let mut terms = Vec::new();

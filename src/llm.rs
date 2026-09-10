@@ -1,7 +1,6 @@
 //! OpenRouter client.
 //!
-//! Two endpoints,
-//! one key.
+//! Two endpoints, one key.
 //! Text goes through `/chat/completions` with function calling.
 //! Images go through `/images`; image models are absent from the chat model list and return 404 from `/chat/completions`.
 
@@ -42,8 +41,7 @@ pub struct ToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionCall {
     pub name: String,
-    /// Raw JSON string,
-    /// per the OpenAI wire format.
+    /// Raw JSON string, per the OpenAI wire format.
     pub arguments: String,
 }
 
@@ -101,8 +99,7 @@ impl Llm {
     }
 
     /// One completion round.
-    /// Returns the assistant message,
-    /// which may carry tool calls instead of content — the caller runs the loop.
+    /// Returns the assistant message, which may carry tool calls instead of content — the caller runs the loop.
     pub async fn chat(&self, messages: &[Message], tools: &[Value]) -> Result<Message> {
         let mut body = json!({
             "model": self.chat_model,
@@ -123,9 +120,7 @@ impl Llm {
             .map_err(|e| classify(e, "chat"))?;
 
         let status = resp.status();
-        // Read as text first: reqwest's timeout covers the body,
-        // so a slow model surfaces here rather than at send(),
-        // and .json() would report it as a parse failure.
+        // Read as text first: reqwest's timeout covers the body, so a slow model surfaces here rather than at send(), and .json() would report it as a parse failure.
         let raw = resp.text().await.map_err(|e| classify(e, "chat"))?;
         let payload: Value = serde_json::from_str(&raw).map_err(|e| {
             anyhow::anyhow!(
@@ -213,8 +208,7 @@ impl Llm {
     }
 }
 
-/// Distinguishes a timeout from a connection failure,
-/// which need different responses.
+/// Distinguishes a timeout from a connection failure, which need different responses.
 fn classify(e: reqwest::Error, what: &str) -> anyhow::Error {
     if e.is_timeout() {
         anyhow::anyhow!("OpenRouter {what} timed out; the model took too long to respond")
@@ -225,8 +219,7 @@ fn classify(e: reqwest::Error, what: &str) -> anyhow::Error {
     }
 }
 
-/// First line of a response body,
-/// for error messages.
+/// First line of a response body, for error messages.
 fn head(raw: &str) -> String {
     let first: String = raw.lines().next().unwrap_or("").chars().take(200).collect();
     if first.is_empty() {

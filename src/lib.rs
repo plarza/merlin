@@ -1,5 +1,4 @@
-//! merlin,
-//! a Matrix assistant.
+//! merlin, a Matrix assistant.
 
 pub mod agent;
 pub mod backfill;
