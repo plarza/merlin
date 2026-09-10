@@ -1,10 +1,9 @@
 //! Message archive.
 //!
-//! Two FTS5 indexes over the same rows. The default tokenizer handles ordinary
-//! term search. Fuzzy search uses the trigram index only to gather candidates
-//! cheaply, then ranks them by edit distance in Rust: trigram MATCH is
-//! substring search, and requires every trigram of the query to be present, so
-//! it cannot match through a typo on its own.
+//! Two FTS5 indexes over the same rows. The default tokenizer serves exact term
+//! search. Fuzzy search uses the trigram index to gather candidates, then ranks
+//! them by Jaro-Winkler similarity: trigram MATCH requires every trigram of the
+//! query to be present, so it cannot match through a typo by itself.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
@@ -144,7 +143,7 @@ impl Archive {
         let mut scored: Vec<(f64, Archived)> = candidates
             .into_iter()
             .map(|row| (best_similarity(&terms, &row.body), row))
-            .filter(|(score, _)| *score >= 0.6)
+            .filter(|(score, _)| *score >= 0.82)
             .collect();
 
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -172,7 +171,7 @@ impl Archive {
     }
 }
 
-/// Best normalised similarity between any query term and any word in the body.
+/// Best similarity between any query term and any word in the body.
 fn best_similarity(terms: &[String], body: &str) -> f64 {
     let words: Vec<String> = body
         .split(|c: char| !c.is_alphanumeric())
@@ -183,12 +182,7 @@ fn best_similarity(terms: &[String], body: &str) -> f64 {
     let mut best = 0.0_f64;
     for term in terms {
         for word in &words {
-            let distance = levenshtein(term, word);
-            let longest = term.chars().count().max(word.chars().count());
-            if longest == 0 {
-                continue;
-            }
-            let score = 1.0 - (distance as f64 / longest as f64);
+            let score = jaro_winkler(term, word);
             if score > best {
                 best = score;
             }
@@ -197,29 +191,77 @@ fn best_similarity(terms: &[String], body: &str) -> f64 {
     best
 }
 
-/// Two-row Levenshtein. Small enough not to justify a dependency.
-fn levenshtein(a: &str, b: &str) -> usize {
+/// Jaro-Winkler similarity in [0, 1].
+///
+/// Preferred over Levenshtein here because it counts a transposition as one
+/// edit rather than two, and typos are usually transpositions, and because the
+/// prefix bonus favours words that start the same.
+fn jaro_winkler(a: &str, b: &str) -> f64 {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
-    if a.is_empty() {
-        return b.len();
+
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
     }
-    if b.is_empty() {
-        return a.len();
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
     }
 
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut curr = vec![0usize; b.len() + 1];
+    // Characters further apart than this cannot be considered a match.
+    let window = (a.len().max(b.len()) / 2).saturating_sub(1);
+
+    let mut a_matched = vec![false; a.len()];
+    let mut b_matched = vec![false; b.len()];
+    let mut matches = 0usize;
 
     for (i, ca) in a.iter().enumerate() {
-        curr[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        let lo = i.saturating_sub(window);
+        let hi = (i + window + 1).min(b.len());
+        for j in lo..hi {
+            if b_matched[j] || b[j] != *ca {
+                continue;
+            }
+            a_matched[i] = true;
+            b_matched[j] = true;
+            matches += 1;
+            break;
         }
-        std::mem::swap(&mut prev, &mut curr);
     }
-    prev[b.len()]
+
+    if matches == 0 {
+        return 0.0;
+    }
+
+    // Matched characters that appear in a different order.
+    let mut transpositions = 0usize;
+    let mut k = 0usize;
+    for (i, matched) in a_matched.iter().enumerate() {
+        if !matched {
+            continue;
+        }
+        while !b_matched[k] {
+            k += 1;
+        }
+        if a[i] != b[k] {
+            transpositions += 1;
+        }
+        k += 1;
+    }
+
+    let m = matches as f64;
+    let jaro = (m / a.len() as f64
+        + m / b.len() as f64
+        + (m - transpositions as f64 / 2.0) / m)
+        / 3.0;
+
+    let prefix = a
+        .iter()
+        .zip(b.iter())
+        .take(4)
+        .take_while(|(x, y)| x == y)
+        .count() as f64;
+
+    jaro + prefix * 0.1 * (1.0 - jaro)
 }
 
 /// FTS5 treats punctuation as syntax, so a raw query can be a syntax error
@@ -306,11 +348,22 @@ mod tests {
     }
 
     #[test]
-    fn levenshtein_is_correct() {
-        assert_eq!(levenshtein("shoelace", "shoelase"), 1);
-        assert_eq!(levenshtein("", "abc"), 3);
-        assert_eq!(levenshtein("kitten", "sitting"), 3);
-        assert_eq!(levenshtein("same", "same"), 0);
+    fn jaro_winkler_ranks_typos_above_unrelated_words() {
+        let typo = jaro_winkler("shoelace", "shoelase");
+        let transposed = jaro_winkler("incident", "incidnet");
+        let unrelated = jaro_winkler("shoelace", "elephant");
+        assert!(typo > 0.9, "single substitution scored {typo}");
+        assert!(transposed > 0.9, "transposition scored {transposed}");
+        assert!(unrelated < 0.6, "unrelated scored {unrelated}");
+        assert_eq!(jaro_winkler("same", "same"), 1.0);
+    }
+
+    #[test]
+    fn transposition_beats_two_substitutions() {
+        // A swap is one mistake, not two.
+        let swap = jaro_winkler("gymnast", "gymnats");
+        let two_subs = jaro_winkler("gymnast", "gymnaxy");
+        assert!(swap > two_subs, "swap {swap} should beat substitutions {two_subs}");
     }
 
     #[test]
