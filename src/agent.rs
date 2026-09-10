@@ -87,10 +87,23 @@ impl Agent {
             }
         }
 
-        // Out of iterations with tools still pending: say so rather than going
-        // silent, and keep any images already produced.
-        result.text = "I ran out of tool steps on that one. Ask again and I'll narrow it down."
-            .to_string();
+        // Out of iterations. Rather than reporting the limit, which tells the
+        // user nothing, ask for an answer from what was already gathered. Tools
+        // are withheld from this call so the model cannot spend another round.
+        messages.push(Message::user(
+            "You have used all available tool steps. Answer now with what you \
+             have already found, and say plainly which parts you could not \
+             confirm. Do not request more tools.",
+        ));
+
+        let forced = self.llm.chat(&messages, &[]).await?;
+        result.text = forced.content.unwrap_or_default().trim().to_string();
+
+        if result.text.is_empty() {
+            result.text =
+                "I hit the tool limit before finding an answer. Narrow the question and I'll retry."
+                    .to_string();
+        }
         Ok(result)
     }
 
