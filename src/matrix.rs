@@ -182,6 +182,13 @@ impl Bot {
                     ms = started.elapsed().as_millis() as u64,
                     reply_chars = turn.text.len(),
                     images = turn.images.len(),
+                    prompt_tokens = turn.prompt_tokens,
+                    completion_tokens = turn.completion_tokens,
+                    tools = %if turn.tools_used.is_empty() {
+                        "none".to_string()
+                    } else {
+                        turn.tools_used.join(",")
+                    },
                     "turn finished"
                 );
                 for image in turn.images {
