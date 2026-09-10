@@ -150,21 +150,10 @@ impl Bot {
 
         // The buffer already contains this message; the turn passes it
         // separately, so drop the last entry from the ambient block.
-        let ambient = {
-            let mut turns = self.buffers.context(&room_id);
-            turns.pop();
-            if turns.is_empty() {
-                None
-            } else {
-                Some(
-                    turns
-                        .iter()
-                        .map(|t| format!("{}: {}", t.sender, t.body))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                )
-            }
-        };
+        let ambient = self.buffers.render(&room_id, true);
+
+        tracing::info!(%sender, chars = body.len(), "turn started");
+        let started = std::time::Instant::now();
 
         let typing = room.typing_notice(true).await;
         if typing.is_err() {
@@ -186,6 +175,12 @@ impl Bot {
 
         match result {
             Ok(turn) => {
+                tracing::info!(
+                    ms = started.elapsed().as_millis() as u64,
+                    reply_chars = turn.text.len(),
+                    images = turn.images.len(),
+                    "turn finished"
+                );
                 for image in turn.images {
                     if let Err(e) = self.send_image(&room, image).await {
                         tracing::warn!(error = %e, "failed sending image");
@@ -196,7 +191,11 @@ impl Bot {
                 }
             }
             Err(e) => {
-                tracing::warn!(error = %e, "turn failed");
+                tracing::warn!(
+                    error = %e,
+                    ms = started.elapsed().as_millis() as u64,
+                    "turn failed"
+                );
                 self.send_text(&room, &format!("that failed: {e}")).await?;
             }
         }
