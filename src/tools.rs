@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
 use crate::cron::{CronStore, Job};
+use crate::embed::Embedder;
 use crate::exec::Sandbox;
 use crate::llm::Llm;
 use crate::memory::Memory;
@@ -22,6 +23,7 @@ pub struct Tools {
     pub llm: Arc<Llm>,
     pub http: reqwest::Client,
     pub exa_key: Option<String>,
+    pub embedder: Arc<Embedder>,
     pub config: Arc<Config>,
 }
 
@@ -53,11 +55,11 @@ pub fn definitions() -> Vec<Value> {
     vec![
         f(
             "memory_recall",
-            "Search your durable memory. Use this BEFORE answering about any person, character, project, file or past decision, and before saying you have no record of something.",
+            "Search your durable memory. Use this BEFORE answering about any person, character, project, file or past decision, and before saying you have no record of something. Unquoted words are matched by meaning, so you can describe what you are after rather than guess the wording. Put a word in double quotes to require it exactly.",
             json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Keywords to search for" },
+                    "query": { "type": "string", "description": "Describe the subject; \"quoted\" words are required exactly" },
                     "limit": { "type": "integer", "description": "Max results, default 8" }
                 },
                 "required": ["query"]
@@ -87,11 +89,11 @@ pub fn definitions() -> Vec<Value> {
         ),
         f(
             "search_messages",
-            "Search the full history of messages in this chat, for what someone actually said. memory_recall searches notes you chose to keep; this searches everything. Bare words match approximately and tolerate misspellings. Put a word in double quotes to require it exactly. The two combine, so 'fifa \"2025\" world cup' finds messages about the world cup that definitely mention 2025.",
+            "Search the full history of messages in this chat, for what someone actually said. memory_recall searches notes you chose to keep; this searches everything. Unquoted words are matched by meaning, so a message is found even when it used none of your words. Put a word in double quotes to require it exactly. The two combine, so 'fifa \"2025\" world cup' finds messages that definitely mention 2025, ranked by how much they are about the world cup.",
             json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Bare words are fuzzy; \"quoted\" words are required exactly" },
+                    "query": { "type": "string", "description": "Describe the subject; \"quoted\" words are required exactly" },
                     "limit": { "type": "integer", "description": "Default 8" }
                 },
                 "required": ["query"]
@@ -216,27 +218,15 @@ impl Tools {
             "memory_recall" => {
                 let query = str_arg(args, "query")?;
                 let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
+                let vector = self.embed_loose(&query).await;
                 let hits = {
                     let mem = self.memory.lock().unwrap();
-                    mem.recall(&query, limit.clamp(1, 25))?
+                    mem.recall(&query, vector.as_deref(), limit.clamp(1, 25))?
                 };
                 if hits.is_empty() {
                     return Ok(Outcome::Text(format!("No memories matched '{query}'.")));
                 }
-                let body = hits
-                    .iter()
-                    .map(|r| {
-                        format!(
-                            "[{}] ({}, {}) {}",
-                            r.key,
-                            r.category,
-                            &r.created_at[..10.min(r.created_at.len())],
-                            r.content
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                Ok(Outcome::Text(body))
+                Ok(Outcome::Text(render_memories(&hits)))
             }
 
             "memory_store" => {
@@ -269,19 +259,15 @@ impl Tools {
             "search_messages" => {
                 let query = str_arg(args, "query")?;
                 let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
+                let vector = self.embed_loose(&query).await;
                 let hits = {
                     let a = self.archive.lock().unwrap();
-                    a.search(&query, limit.clamp(1, 30))?
+                    a.search(&query, vector.as_deref(), limit.clamp(1, 30))?
                 };
                 if hits.is_empty() {
                     return Ok(Outcome::Text(format!("No messages matched '{query}'.")));
                 }
-                let body = hits
-                    .iter()
-                    .map(|h| format!("[{}] {}: {}", &h.at[..10.min(h.at.len())], h.sender, h.body))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                Ok(Outcome::Text(body))
+                Ok(Outcome::Text(render_messages(&hits)))
             }
 
             "web_search" => {
@@ -468,6 +454,24 @@ impl Tools {
         }
     }
 
+    /// Embed the unquoted part of a query, which is what ranking by meaning uses.
+    ///
+    /// Returns None when everything was quoted, so a purely exact search costs no round trip.
+    /// A failure here is also None rather than an error: search then falls back to keyword matching, which is far better than failing the tool.
+    async fn embed_loose(&self, query: &str) -> Option<Vec<f32>> {
+        let text = crate::query::loose_text(query);
+        if text.is_empty() {
+            return None;
+        }
+        match self.embedder.embed(&[text]).await {
+            Ok(mut vectors) => vectors.pop(),
+            Err(e) => {
+                tracing::warn!(error = %e, "embedding the query failed; falling back to keyword search");
+                None
+            }
+        }
+    }
+
     /// Shared HTTP path for web_fetch and http_request.
     /// Errors above the byte cap rather than truncating, so a partial body is never mistaken for a whole one.
     async fn fetch_capped(
@@ -512,6 +516,28 @@ impl Tools {
         }
         Ok(text)
     }
+}
+
+fn render_memories(hits: &[crate::memory::Record]) -> String {
+    hits.iter()
+        .map(|r| {
+            format!(
+                "[{}] ({}, {}) {}",
+                r.key,
+                r.category,
+                &r.created_at[..10.min(r.created_at.len())],
+                r.content
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_messages(hits: &[crate::messages::Archived]) -> String {
+    hits.iter()
+        .map(|h| format!("[{}] {}: {}", &h.at[..10.min(h.at.len())], h.sender, h.body))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn str_arg(args: &Value, key: &str) -> Result<String> {

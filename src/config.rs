@@ -47,6 +47,12 @@ pub struct ModelConfig {
     pub chat: String,
     #[serde(default = "default_image_model")]
     pub image: String,
+    #[serde(default = "default_embedding_model")]
+    pub embedding: String,
+    /// Matryoshka truncation width.
+    /// 768 keeps the storage for a full archive around a tenth of a gigabyte while giving up very little retrieval quality against the native 3072.
+    #[serde(default = "default_embedding_dimensions")]
+    pub embedding_dimensions: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,6 +67,9 @@ pub struct Limits {
     pub exec_timeout_s: u64,
     #[serde(default = "default_exec_memory_max")]
     pub exec_memory_max: String,
+    /// Rows sent to the embedding endpoint per request.
+    #[serde(default = "default_embed_batch")]
+    pub embed_batch: usize,
 }
 
 /// Credentials, read from the environment only.
@@ -176,6 +185,8 @@ impl Default for ModelConfig {
         Self {
             chat: default_chat_model(),
             image: default_image_model(),
+            embedding: default_embedding_model(),
+            embedding_dimensions: default_embedding_dimensions(),
         }
     }
 }
@@ -188,6 +199,7 @@ impl Default for Limits {
             request_timeout_s: default_request_timeout_s(),
             exec_timeout_s: default_exec_timeout_s(),
             exec_memory_max: default_exec_memory_max(),
+            embed_batch: default_embed_batch(),
         }
     }
 }
@@ -203,6 +215,15 @@ fn default_chat_model() -> String {
 }
 fn default_image_model() -> String {
     "meta/muse-image".into()
+}
+fn default_embedding_model() -> String {
+    "google/gemini-embedding-001".into()
+}
+fn default_embedding_dimensions() -> usize {
+    768
+}
+fn default_embed_batch() -> usize {
+    32
 }
 fn default_max_response_bytes() -> usize {
     8 * 1024 * 1024

@@ -6,6 +6,15 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
+use crate::embed;
+use crate::query::{Term, loose_text, parse, required_expr};
+
+const VEC_TABLE: &str = "memory_vectors";
+const VEC_KEY: &str = "memory_rowid";
+
+/// How many required-term matches are pulled before ranking them by meaning.
+const CANDIDATE_CAP: usize = 500;
+
 pub struct Memory {
     conn: Connection,
 }
@@ -52,6 +61,7 @@ END;
 
 impl Memory {
     pub fn open(path: &Path) -> Result<Self> {
+        embed::register();
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
@@ -88,12 +98,123 @@ impl Memory {
                 now
             ],
         )?;
+
+        // A revised entry keeps its rowid, so its vector would otherwise survive as a description of the old text.
+        if let Some(rowid) = self.rowid(key)? {
+            embed::invalidate(&self.conn, VEC_TABLE, VEC_KEY, rowid).ok();
+        }
         Ok(())
     }
 
-    /// BM25 keyword search.
-    /// Falls back to a LIKE scan when the query has no usable FTS tokens, so a search for punctuation or a bare id still works.
-    pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<Record>> {
+    fn rowid(&self, key: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT rowid FROM memories WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Search with the shared query syntax.
+    /// Quoted terms must appear exactly and select the candidate set; the unquoted remainder ranks that set by meaning.
+    ///
+    /// The caller supplies the embedding of the unquoted text, since embedding is a network call and this type is held behind a lock.
+    /// Without a vector, or before the backlog loop has reached these rows, this falls back to keyword matching.
+    pub fn recall(&self, query: &str, vector: Option<&[f32]>, limit: usize) -> Result<Vec<Record>> {
+        let terms = parse(query);
+        let exact: Vec<&Term> = terms.iter().filter(|t| t.exact).collect();
+
+        // Every term was quoted, so the requirements are the whole query.
+        if !exact.is_empty() && loose_text(query).is_empty() {
+            let hits = self.required(&exact, limit)?;
+            if !hits.is_empty() {
+                return Ok(hits.into_iter().map(|(_, r)| r).collect());
+            }
+        }
+
+        if let Some(vector) = vector {
+            let hits = if exact.is_empty() {
+                self.nearest_records(vector, limit)?
+            } else {
+                let candidates = self.required(&exact, CANDIDATE_CAP)?;
+                self.rank_by_vector(candidates, vector, limit)?
+            };
+            if !hits.is_empty() {
+                return Ok(hits);
+            }
+        }
+
+        self.recall_keyword(query, limit)
+    }
+
+    /// Memories containing every quoted term, in BM25 order.
+    fn required(&self, exact: &[&Term], limit: usize) -> Result<Vec<(i64, Record)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.rowid, m.key, m.content, m.category, m.created_at
+             FROM memories_fts f
+             JOIN memories m ON m.rowid = f.rowid
+             WHERE memories_fts MATCH ?1
+             ORDER BY bm25(memories_fts) LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![required_expr(exact), limit as i64], |r| {
+                Ok((r.get(0)?, row_to_record_from(r, 1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Rank a candidate set by cosine against the query vector.
+    /// Candidates with no vector yet fall in behind everything scored rather than disappearing.
+    fn rank_by_vector(
+        &self,
+        candidates: Vec<(i64, Record)>,
+        vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<Record>> {
+        let ids: Vec<i64> = candidates.iter().map(|(id, _)| *id).collect();
+        let vectors = embed::vectors_for(&self.conn, VEC_TABLE, VEC_KEY, &ids)?;
+        if vectors.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut scored: Vec<(f32, Record)> = Vec::new();
+        let mut unscored: Vec<Record> = Vec::new();
+        for (id, row) in candidates {
+            match vectors.get(&id) {
+                Some(v) => scored.push((embed::cosine(vector, v), row)),
+                None => unscored.push(row),
+            }
+        }
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut out: Vec<Record> = scored.into_iter().map(|(_, r)| r).collect();
+        out.extend(unscored);
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    /// Nearest memories by meaning across the whole store, closest first.
+    fn nearest_records(&self, vector: &[f32], limit: usize) -> Result<Vec<Record>> {
+        let ids = embed::nearest(&self.conn, VEC_TABLE, VEC_KEY, vector, limit)?;
+        let mut out = Vec::with_capacity(ids.len());
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, content, category, created_at FROM memories WHERE rowid = ?1")?;
+        for id in ids {
+            // Ordering comes from the vector search, so rows are fetched one at a time to preserve it.
+            if let Some(record) = stmt.query_row(params![id], row_to_record).optional()? {
+                out.push(record);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The fallback when no embedding is available.
+    /// Drops to a LIKE scan when the query has no usable FTS tokens, so a search for punctuation or a bare id still works.
+    fn recall_keyword(&self, query: &str, limit: usize) -> Result<Vec<Record>> {
         let cleaned = sanitize_fts(query);
 
         if !cleaned.is_empty() {
@@ -125,10 +246,43 @@ impl Memory {
     }
 
     pub fn forget(&self, key: &str) -> Result<bool> {
+        // Delete the vector first, while the rowid is still resolvable.
+        // SQLite reuses freed rowids, so an orphaned vector would eventually answer for whichever memory lands on that rowid next.
+        if let Some(rowid) = self.rowid(key)? {
+            embed::invalidate(&self.conn, VEC_TABLE, VEC_KEY, rowid).ok();
+        }
         let n = self
             .conn
             .execute("DELETE FROM memories WHERE key = ?1", params![key])?;
         Ok(n > 0)
+    }
+
+    /// Build the vector table for a given model, discarding vectors from a different one.
+    pub fn enable_semantic(&self, model: &str, dimensions: usize) -> Result<()> {
+        embed::ensure_table(&self.conn, VEC_TABLE, VEC_KEY, model, dimensions)
+    }
+
+    /// Memories with no vector yet, newest first, as (rowid, text to embed).
+    ///
+    /// Only the content is embedded. Keys are frequently opaque identifiers rather than descriptions, and feeding one into an embedding is noise.
+    pub fn pending_embeddings(&self, limit: usize) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT rowid, content FROM memories
+             WHERE rowid NOT IN (SELECT {VEC_KEY} FROM {VEC_TABLE})
+             ORDER BY rowid DESC LIMIT ?1"
+        ))?;
+        let rows = stmt
+            .query_map(params![limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn save_embeddings(&mut self, rows: &[(i64, Vec<f32>)]) -> Result<usize> {
+        embed::save(&mut self.conn, VEC_TABLE, VEC_KEY, rows)
+    }
+
+    pub fn pending_count(&self) -> Result<i64> {
+        embed::count_pending(&self.conn, "memories", VEC_TABLE, VEC_KEY)
     }
 
     pub fn count(&self) -> Result<i64> {
@@ -179,11 +333,16 @@ impl Memory {
 }
 
 fn row_to_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
+    row_to_record_from(r, 0)
+}
+
+/// The same four columns, at an offset, for queries that select the rowid first.
+fn row_to_record_from(r: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<Record> {
     Ok(Record {
-        key: r.get(0)?,
-        content: r.get(1)?,
-        category: r.get(2)?,
-        created_at: r.get(3)?,
+        key: r.get(base)?,
+        content: r.get(base + 1)?,
+        category: r.get(base + 2)?,
+        created_at: r.get(base + 3)?,
     })
 }
 

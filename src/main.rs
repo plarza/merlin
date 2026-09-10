@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use merlin::agent::Agent;
 use merlin::config::{Config, Secrets};
 use merlin::cron::CronStore;
+use merlin::embed::Embedder;
 use merlin::exec::Sandbox;
 use merlin::llm::Llm;
 use merlin::matrix::Bot;
@@ -90,6 +91,27 @@ async fn main() -> Result<()> {
         config.limits.request_timeout_s,
     )?);
 
+    let embedder = Arc::new(Embedder::new(
+        secrets.openrouter_api_key.clone(),
+        config.model.embedding.clone(),
+        config.model.embedding_dimensions,
+        config.limits.request_timeout_s,
+    )?);
+
+    {
+        let memory = memory.lock().unwrap();
+        memory.enable_semantic(&config.model.embedding, embedder.dimensions())?;
+        let archive = archive.lock().unwrap();
+        archive.enable_semantic(&config.model.embedding, embedder.dimensions())?;
+        tracing::info!(
+            model = %config.model.embedding,
+            dimensions = embedder.dimensions(),
+            memories = memory.pending_count()?,
+            messages = archive.pending_count()?,
+            "semantic index ready"
+        );
+    }
+
     let sandbox = Arc::new(Sandbox::new(
         exec_runner(),
         config.limits.exec_timeout_s,
@@ -110,6 +132,7 @@ async fn main() -> Result<()> {
         llm: Arc::clone(&llm),
         http,
         exa_key: secrets.exa_api_key.clone(),
+        embedder: Arc::clone(&embedder),
         config: Arc::clone(&config),
     });
 
@@ -153,6 +176,13 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
+
+    tokio::spawn(merlin::embed::run(
+        embedder,
+        Arc::clone(&memory),
+        Arc::clone(&archive),
+        config.limits.embed_batch,
+    ));
 
     // Refill the ambient buffer from the archive, so a restart does not leave the bot blind to what was just said.
     let buffers = Arc::new(Buffers::new(config.context_window));
