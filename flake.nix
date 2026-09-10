@@ -63,8 +63,14 @@
                 --die-with-parent \
                 --new-session \
                 --ro-bind /nix/store /nix/store \
-                --ro-bind /etc/ssl /etc/ssl \
-                --ro-bind /etc/static/ssl /etc/static/ssl \
+                --ro-bind-try /etc/ssl /etc/ssl \
+                --ro-bind-try /etc/static/ssl /etc/static/ssl \
+                --ro-bind-try /etc/pki /etc/pki \
+                --ro-bind-try /etc/resolv.conf /etc/resolv.conf \
+                --ro-bind-try /etc/hosts /etc/hosts \
+                --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf \
+                --ro-bind-try /etc/services /etc/services \
+                --ro-bind-try /etc/protocols /etc/protocols \
                 --proc /proc \
                 --dev /dev \
                 --tmpfs /tmp \
@@ -72,6 +78,7 @@
                 --chdir /work \
                 --setenv HOME /work \
                 --setenv PATH /usr/bin:/bin \
+                --setenv SSL_CERT_FILE /etc/ssl/certs/ca-certificates.crt \
                 --ro-bind "$(dirname "$(readlink -f "$(command -v python3)")")" /usr/bin \
                 "''${interp[@]}"
           '';
