@@ -43,9 +43,14 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
-  nix:
-    name: nix build and cache
+  build:
+    name: build and publish
     runs-on: ubuntu-latest
+    # Secrets are unavailable to a step-level `if`, so the decision is made once
+    # here, at job level, where the secrets context does resolve.
+    env:
+      CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME || 's1dny' }}
+      HAVE_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN != '' && 'yes' || 'no' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -54,21 +59,36 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # Pushing the built closure is what makes deploys a download instead of a
-      # rebuild. Without the token the build still runs, it just is not shared.
+      # Pushing the closure is what turns a deploy into a download. Without a
+      # token the build still runs, it just is not shared.
       - uses: cachix/cachix-action@v16
-        if: ${{ env.CACHIX_AUTH_TOKEN != '' }}
-        env:
-          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        if: env.HAVE_TOKEN == 'yes'
         with:
-          name: ${{ vars.CACHIX_CACHE_NAME || 'merlin' }}
+          name: ${{ env.CACHE_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - run: nix build .#merlin --print-build-logs
       - run: nix build .#merlin-sandbox --print-build-logs
 
+      # Ubuntu 24.04 runners restrict unprivileged user namespaces through
+      # AppArmor, which is exactly what bubblewrap needs. Without this the
+      # sandbox cannot start and the smoke test fails on the runner rather than
+      # on anything wrong with the sandbox.
+      - name: allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: sandbox smoke test
         run: |
           set -euo pipefail
-          out=$(echo 'print(6*7)' | ./result/bin/merlin-sandbox python)
-          test "$out" = "42" || { echo "sandbox returned '$out'"; exit 1; }
+          root=$(mktemp -d)/root
+          work=$(mktemp -d)
+          mkdir -p "$root"
+          tar -xzf "$(nix build .#sandbox-rootfs --no-link --print-out-paths)" -C "$root"
+          printf 'nameserver 1.1.1.1\n' > "$root/etc/resolv.conf"
+
+          out=$(echo 'echo $((6*7)); pwd' \
+            | MERLIN_SANDBOX_ROOT="$root" MERLIN_WORKSPACE="$work" \
+              ./result/bin/merlin-sandbox bash)
+          echo "sandbox said: $out"
+          [ "$(echo "$out" | sed -n 1p)" = "42" ] || { echo "arithmetic failed"; exit 1; }
+          [ "$(echo "$out" | sed -n 2p)" = "/work" ] || { echo "wrong working directory"; exit 1; }
