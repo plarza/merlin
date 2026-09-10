@@ -81,7 +81,8 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading config at {}", path.display()))?;
-        let config: Config = toml::from_str(&raw).context("parsing config TOML")?;
+        let mut config: Config = toml::from_str(&raw).context("parsing config TOML")?;
+        config.apply_env_overrides();
 
         if config.allowed_rooms.is_empty() {
             anyhow::bail!("allowed_rooms is empty; the bot would join nothing");
@@ -90,6 +91,19 @@ impl Config {
             anyhow::bail!("allowed_senders is empty; nobody could address the bot");
         }
         Ok(config)
+    }
+
+    /// Identifiers can come from the environment instead of the file. The
+    /// config is rendered into the world-readable Nix store from a public
+    /// repository, and a private room's id does not belong there even though it
+    /// is not a credential.
+    pub fn apply_env_overrides(&mut self) {
+        if let Some(rooms) = list_from_env("MERLIN_ALLOWED_ROOMS") {
+            self.allowed_rooms = rooms;
+        }
+        if let Some(senders) = list_from_env("MERLIN_ALLOWED_SENDERS") {
+            self.allowed_senders = senders;
+        }
     }
 
     pub fn localpart(&self) -> &str {
@@ -141,6 +155,17 @@ fn req(key: &str) -> Result<String> {
                 Ok(v)
             }
         })
+}
+
+/// Comma-separated env list, empty entries dropped.
+fn list_from_env(key: &str) -> Option<Vec<String>> {
+    let raw = std::env::var(key).ok()?;
+    let items: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if items.is_empty() { None } else { Some(items) }
 }
 
 fn opt(key: &str) -> Option<String> {
@@ -204,6 +229,18 @@ mod tests {
     #[test]
     fn localpart_strips_sigil_and_server() {
         assert_eq!(cfg("@merlin:matrix.aza.network").localpart(), "merlin");
+    }
+
+    #[test]
+    fn env_overrides_replace_config_lists() {
+        // SAFETY: single-threaded test process, no other reader of this var.
+        unsafe {
+            std::env::set_var("MERLIN_ALLOWED_ROOMS", " !x:example.org , ,!y:example.org ");
+        }
+        let mut c = cfg("@merlin:example.org");
+        c.apply_env_overrides();
+        assert_eq!(c.allowed_rooms, vec!["!x:example.org", "!y:example.org"]);
+        unsafe { std::env::remove_var("MERLIN_ALLOWED_ROOMS"); }
     }
 
     #[test]

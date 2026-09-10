@@ -58,8 +58,8 @@ in
     users.groups.merlin = { };
 
     # Owns nothing. run_code executes as this user so that executed code cannot
-    # read merlin's state or its EnvironmentFile, and so nftables has a uid to
-    # match on for LAN egress.
+    # read merlin's state or its EnvironmentFile, and so the firewall has a uid
+    # to match on for LAN egress.
     users.users.merlin-exec = {
       isSystemUser = true;
       group = "merlin-exec";
@@ -84,18 +84,30 @@ in
 
     # Executed code reaches the public internet but not the LAN. Without this
     # the sandbox would still see k3s, libsql, Grafana and the local registry.
-    networking.nftables.enable = lib.mkDefault true;
-    networking.nftables.ruleset = lib.mkAfter ''
-      table inet merlin_exec {
-        chain output {
-          type filter hook output priority 0; policy accept;
-          meta skuid "merlin-exec" ip daddr {
-            10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
-            169.254.0.0/16, 127.0.0.0/8
-          } counter reject
-          meta skuid "merlin-exec" ip6 daddr { ::1/128, fc00::/7, fe80::/10 } counter reject
-        }
-      }
+    #
+    # Deliberately expressed as iptables rules inside the existing firewall
+    # rather than by enabling networking.nftables: this host runs k3s, whose
+    # kube-proxy programs iptables directly, and switching the backend
+    # underneath it risks cluster networking.
+    networking.firewall.extraCommands = ''
+      iptables -w -C OUTPUT -m owner --uid-owner merlin-exec -d 10.0.0.0/8 -j REJECT 2>/dev/null || \
+        iptables -w -I OUTPUT -m owner --uid-owner merlin-exec -d 10.0.0.0/8 -j REJECT
+      iptables -w -C OUTPUT -m owner --uid-owner merlin-exec -d 172.16.0.0/12 -j REJECT 2>/dev/null || \
+        iptables -w -I OUTPUT -m owner --uid-owner merlin-exec -d 172.16.0.0/12 -j REJECT
+      iptables -w -C OUTPUT -m owner --uid-owner merlin-exec -d 192.168.0.0/16 -j REJECT 2>/dev/null || \
+        iptables -w -I OUTPUT -m owner --uid-owner merlin-exec -d 192.168.0.0/16 -j REJECT
+      iptables -w -C OUTPUT -m owner --uid-owner merlin-exec -d 169.254.0.0/16 -j REJECT 2>/dev/null || \
+        iptables -w -I OUTPUT -m owner --uid-owner merlin-exec -d 169.254.0.0/16 -j REJECT
+      iptables -w -C OUTPUT -m owner --uid-owner merlin-exec -d 127.0.0.0/8 -j REJECT 2>/dev/null || \
+        iptables -w -I OUTPUT -m owner --uid-owner merlin-exec -d 127.0.0.0/8 -j REJECT
+    '';
+
+    networking.firewall.extraStopCommands = ''
+      iptables -w -D OUTPUT -m owner --uid-owner merlin-exec -d 10.0.0.0/8 -j REJECT 2>/dev/null || true
+      iptables -w -D OUTPUT -m owner --uid-owner merlin-exec -d 172.16.0.0/12 -j REJECT 2>/dev/null || true
+      iptables -w -D OUTPUT -m owner --uid-owner merlin-exec -d 192.168.0.0/16 -j REJECT 2>/dev/null || true
+      iptables -w -D OUTPUT -m owner --uid-owner merlin-exec -d 169.254.0.0/16 -j REJECT 2>/dev/null || true
+      iptables -w -D OUTPUT -m owner --uid-owner merlin-exec -d 127.0.0.0/8 -j REJECT 2>/dev/null || true
     '';
 
     systemd.tmpfiles.rules = [
