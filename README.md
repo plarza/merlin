@@ -1,9 +1,15 @@
 <div align="center">
-<img src="docs/merlin.jpg" alt="merlin" width="240">
+<img src="docs/merlin.jpg" alt="" width="220">
 
-# merlin
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/title-dark.svg">
+  <img src="docs/title-light.svg" alt="merlin" width="300">
+</picture>
+
 *a pico openclaw for matrix*
 </div>
+
+
 
 ## tools
 

@@ -145,6 +145,7 @@ async fn run_once(job: &Job, agent: &Agent, bot: &Bot) -> Result<()> {
             body: &job.prompt,
             ambient: None,
             reply_parent: None,
+            attachments: Vec::new(),
         })
         .await?;
 

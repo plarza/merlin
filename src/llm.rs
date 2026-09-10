@@ -22,8 +22,9 @@ pub struct Llm {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
+    /// A plain string, or an array of parts when the message carries images.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,16 +60,41 @@ impl Message {
     fn plain(role: &str, content: impl Into<String>) -> Self {
         Self {
             role: role.into(),
-            content: Some(content.into()),
+            content: Some(Value::String(content.into())),
             tool_calls: Vec::new(),
             tool_call_id: None,
         }
     }
 
+    /// A user message carrying images alongside its text.
+    /// Images are inlined as data URIs, which is the form the chat endpoint accepts.
+    pub fn user_with_images(text: impl Into<String>, images: &[Attachment]) -> Self {
+        let mut parts = vec![json!({ "type": "text", "text": text.into() })];
+        for image in images {
+            use base64::Engine;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&image.bytes);
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:{};base64,{}", image.media_type, encoded) }
+            }));
+        }
+        Self {
+            role: "user".into(),
+            content: Some(Value::Array(parts)),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    /// Text of the message, when it has any.
+    pub fn text(&self) -> Option<&str> {
+        self.content.as_ref().and_then(Value::as_str)
+    }
+
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: "tool".into(),
-            content: Some(content.into()),
+            content: Some(Value::String(content.into())),
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
         }
@@ -91,6 +117,13 @@ impl Usage {
 pub struct Completion {
     pub message: Message,
     pub usage: Usage,
+}
+
+/// A file received in a room, already downloaded and decrypted.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub bytes: Vec<u8>,
+    pub media_type: String,
 }
 
 pub struct GeneratedImage {
@@ -211,7 +244,7 @@ impl Llm {
                 content: if content.is_empty() {
                     None
                 } else {
-                    Some(content)
+                    Some(Value::String(content))
                 },
                 tool_calls: calls,
                 tool_call_id: None,

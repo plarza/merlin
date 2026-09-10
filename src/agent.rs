@@ -3,7 +3,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::llm::{Llm, Message};
+use crate::llm::{Attachment, Llm, Message};
 use crate::tools::{Outcome, Tools, definitions};
 
 pub struct Agent {
@@ -39,15 +39,19 @@ pub struct Incoming<'a> {
     pub ambient: Option<String>,
     /// Text of the message being replied to, when this is a reply, so a reply carrying only the bot's name still has its subject.
     pub reply_parent: Option<String>,
+    /// Images sent with the message, already downloaded and decrypted.
+    pub attachments: Vec<Attachment>,
 }
 
 impl Agent {
     pub async fn turn(&self, incoming: Incoming<'_>) -> Result<TurnResult> {
         let mut messages = vec![Message::system(system_prompt(&self.soul, &incoming))];
-        messages.push(Message::user(format!(
-            "{}: {}",
-            incoming.sender, incoming.body
-        )));
+        let text = format!("{}: {}", incoming.sender, incoming.body);
+        messages.push(if incoming.attachments.is_empty() {
+            Message::user(text)
+        } else {
+            Message::user_with_images(text, &incoming.attachments)
+        });
 
         let tool_defs = definitions();
         let mut result = TurnResult::default();
@@ -59,7 +63,7 @@ impl Agent {
             let reply = completion.message;
 
             if reply.tool_calls.is_empty() {
-                result.text = reply.content.unwrap_or_default().trim().to_string();
+                result.text = reply.text().unwrap_or_default().trim().to_string();
                 return Ok(result);
             }
 
@@ -117,12 +121,7 @@ impl Agent {
         let forced = self.llm.chat(&messages, &[]).await?;
         result.prompt_tokens += forced.usage.prompt;
         result.completion_tokens += forced.usage.completion;
-        result.text = forced
-            .message
-            .content
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        result.text = forced.message.text().unwrap_or_default().trim().to_string();
 
         if result.text.is_empty() {
             result.text =

@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use mxlink::matrix_sdk::Room;
+use mxlink::matrix_sdk::media::{MediaFormat, MediaRequestParameters};
 use mxlink::matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
 };
@@ -17,6 +18,7 @@ use mxlink::{
 
 use crate::agent::{Agent, Incoming};
 use crate::config::{Config, Secrets};
+use crate::llm::Attachment;
 use crate::room::{Buffers, Turn, is_addressed};
 
 pub struct Bot {
@@ -92,10 +94,24 @@ impl Bot {
             return Ok(());
         }
 
-        let MessageType::Text(text) = &event.content.msgtype else {
-            return Ok(());
+        // An image carries its filename or caption as the body, which is what a
+        // person sees, so it reads sensibly in the archive and the buffer too.
+        let (body, image) = match &event.content.msgtype {
+            MessageType::Text(text) => (text.body.trim().to_string(), None),
+            MessageType::Image(image) => (
+                format!("[image] {}", image.body.trim()),
+                Some((
+                    image.source.clone(),
+                    image.info.as_ref().and_then(|i| i.mimetype.clone()),
+                )),
+            ),
+            // Other attachment types are noted but not fetched: the model
+            // cannot read them, and the note is enough for it to respond.
+            MessageType::File(file) => (format!("[file] {}", file.body.trim()), None),
+            MessageType::Video(video) => (format!("[video] {}", video.body.trim()), None),
+            MessageType::Audio(audio) => (format!("[audio] {}", audio.body.trim()), None),
+            _ => return Ok(()),
         };
-        let body = text.body.trim().to_string();
         if body.is_empty() {
             return Ok(());
         }
@@ -158,6 +174,12 @@ impl Bot {
         tracing::info!(%sender, chars = body.len(), "turn started");
         let started = std::time::Instant::now();
 
+        // Fetched only for a turn that will actually run, so ambient images cost nothing.
+        let attachments = match image {
+            Some((source, mimetype)) => self.fetch_image(&room, source, mimetype).await,
+            None => Vec::new(),
+        };
+
         let typing = room.typing_notice(true).await;
         if typing.is_err() {
             tracing::debug!("could not send typing notice");
@@ -171,6 +193,7 @@ impl Bot {
                 body: &body,
                 ambient,
                 reply_parent: reply_parent.map(|(_, body)| body),
+                attachments,
             })
             .await;
 
@@ -232,6 +255,45 @@ impl Bot {
             .client()
             .get_room(&parsed)
             .with_context(|| format!("not joined to room {room_id}"))
+    }
+
+    /// Download and decrypt an image so the model can look at it.
+    /// Oversized images are skipped rather than truncated, since a partial image is worse than none.
+    async fn fetch_image(
+        &self,
+        room: &Room,
+        source: mxlink::matrix_sdk::ruma::events::room::MediaSource,
+        mimetype: Option<String>,
+    ) -> Vec<Attachment> {
+        const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+        let request = MediaRequestParameters {
+            source,
+            format: MediaFormat::File,
+        };
+
+        match room
+            .client()
+            .media()
+            .get_media_content(&request, true)
+            .await
+        {
+            Ok(bytes) if bytes.len() <= MAX_IMAGE_BYTES => {
+                tracing::info!(bytes = bytes.len(), "attachment fetched");
+                vec![Attachment {
+                    bytes,
+                    media_type: mimetype.unwrap_or_else(|| "image/png".to_string()),
+                }]
+            }
+            Ok(bytes) => {
+                tracing::warn!(bytes = bytes.len(), "attachment over size cap, skipping");
+                Vec::new()
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not fetch attachment");
+                Vec::new()
+            }
+        }
     }
 
     /// Sender and body of the message being replied to, when there is one.

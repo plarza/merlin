@@ -5,7 +5,7 @@
 
 use merlin::cron::{CronStore, Job};
 use merlin::exec::Sandbox;
-use merlin::llm::Message;
+use merlin::llm::{Attachment, Message};
 use merlin::memory::Memory;
 use merlin::messages::Archive;
 use merlin::room::{Buffers, Turn, is_addressed};
@@ -356,6 +356,29 @@ fn tool_results_and_calls_match_the_openai_wire_format() {
     }))
     .unwrap();
     assert_eq!(parsed.tool_calls[0].function.name, "memory_recall");
+}
+
+#[test]
+fn a_message_with_images_serialises_as_multipart_content() {
+    let m = Message::user_with_images(
+        "look at this",
+        &[Attachment {
+            bytes: vec![1, 2, 3],
+            media_type: "image/png".into(),
+        }],
+    );
+    let v = serde_json::to_value(&m).unwrap();
+    let parts = v["content"].as_array().expect("content must be an array");
+    assert_eq!(parts[0]["type"], "text");
+    assert_eq!(parts[0]["text"], "look at this");
+    assert_eq!(parts[1]["type"], "image_url");
+    // Inlined as a data URI carrying the declared media type.
+    let url = parts[1]["image_url"]["url"].as_str().unwrap();
+    assert!(url.starts_with("data:image/png;base64,"));
+
+    // A message without images stays a plain string, which is what the API expects.
+    let plain = serde_json::to_value(Message::user("hello")).unwrap();
+    assert!(plain["content"].is_string());
 }
 
 #[test]
