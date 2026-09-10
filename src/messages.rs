@@ -4,8 +4,12 @@
 //! search. Fuzzy search uses the trigram index to gather candidates, then ranks
 //! them by Jaro-Winkler similarity: trigram MATCH requires every trigram of the
 //! query to be present, so it cannot match through a typo by itself.
+//!
+//! Similarity comes from rapidfuzz, whose implementations are bit-parallel and
+//! carry no dependencies of their own.
 
 use anyhow::{Context, Result};
+use rapidfuzz::distance::jaro_winkler;
 use rusqlite::{Connection, params};
 use std::path::Path;
 
@@ -138,7 +142,8 @@ impl Archive {
             .join(" OR ");
 
         // Over-fetch, because trigram overlap ranks poorly on its own.
-        let candidates = self.query_index("messages_trigram", &expr, limit.saturating_mul(8).max(40))?;
+        let candidates =
+            self.query_index("messages_trigram", &expr, limit.saturating_mul(8).max(40))?;
 
         let mut scored: Vec<(f64, Archived)> = candidates
             .into_iter()
@@ -182,86 +187,13 @@ fn best_similarity(terms: &[String], body: &str) -> f64 {
     let mut best = 0.0_f64;
     for term in terms {
         for word in &words {
-            let score = jaro_winkler(term, word);
+            let score = jaro_winkler::similarity(term.chars(), word.chars());
             if score > best {
                 best = score;
             }
         }
     }
     best
-}
-
-/// Jaro-Winkler similarity in [0, 1].
-///
-/// Preferred over Levenshtein here because it counts a transposition as one
-/// edit rather than two, and typos are usually transpositions, and because the
-/// prefix bonus favours words that start the same.
-fn jaro_winkler(a: &str, b: &str) -> f64 {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-
-    if a.is_empty() && b.is_empty() {
-        return 1.0;
-    }
-    if a.is_empty() || b.is_empty() {
-        return 0.0;
-    }
-
-    // Characters further apart than this cannot be considered a match.
-    let window = (a.len().max(b.len()) / 2).saturating_sub(1);
-
-    let mut a_matched = vec![false; a.len()];
-    let mut b_matched = vec![false; b.len()];
-    let mut matches = 0usize;
-
-    for (i, ca) in a.iter().enumerate() {
-        let lo = i.saturating_sub(window);
-        let hi = (i + window + 1).min(b.len());
-        for j in lo..hi {
-            if b_matched[j] || b[j] != *ca {
-                continue;
-            }
-            a_matched[i] = true;
-            b_matched[j] = true;
-            matches += 1;
-            break;
-        }
-    }
-
-    if matches == 0 {
-        return 0.0;
-    }
-
-    // Matched characters that appear in a different order.
-    let mut transpositions = 0usize;
-    let mut k = 0usize;
-    for (i, matched) in a_matched.iter().enumerate() {
-        if !matched {
-            continue;
-        }
-        while !b_matched[k] {
-            k += 1;
-        }
-        if a[i] != b[k] {
-            transpositions += 1;
-        }
-        k += 1;
-    }
-
-    let m = matches as f64;
-    let jaro = (m / a.len() as f64
-        + m / b.len() as f64
-        + (m - transpositions as f64 / 2.0) / m)
-        / 3.0;
-
-    let prefix = a
-        .iter()
-        .zip(b.iter())
-        .take(4)
-        .take_while(|(x, y)| x == y)
-        .count() as f64;
-
-    jaro + prefix * 0.1 * (1.0 - jaro)
 }
 
 /// FTS5 treats punctuation as syntax, so a raw query can be a syntax error
@@ -349,21 +281,27 @@ mod tests {
 
     #[test]
     fn jaro_winkler_ranks_typos_above_unrelated_words() {
-        let typo = jaro_winkler("shoelace", "shoelase");
-        let transposed = jaro_winkler("incident", "incidnet");
-        let unrelated = jaro_winkler("shoelace", "elephant");
+        let typo = jaro_winkler::similarity("shoelace".chars(), "shoelase".chars());
+        let transposed = jaro_winkler::similarity("incident".chars(), "incidnet".chars());
+        let unrelated = jaro_winkler::similarity("shoelace".chars(), "elephant".chars());
         assert!(typo > 0.9, "single substitution scored {typo}");
         assert!(transposed > 0.9, "transposition scored {transposed}");
         assert!(unrelated < 0.6, "unrelated scored {unrelated}");
-        assert_eq!(jaro_winkler("same", "same"), 1.0);
+        assert_eq!(
+            jaro_winkler::similarity("same".chars(), "same".chars()),
+            1.0
+        );
     }
 
     #[test]
     fn transposition_beats_two_substitutions() {
         // A swap is one mistake, not two.
-        let swap = jaro_winkler("gymnast", "gymnats");
-        let two_subs = jaro_winkler("gymnast", "gymnaxy");
-        assert!(swap > two_subs, "swap {swap} should beat substitutions {two_subs}");
+        let swap = jaro_winkler::similarity("gymnast".chars(), "gymnats".chars());
+        let two_subs = jaro_winkler::similarity("gymnast".chars(), "gymnaxy".chars());
+        assert!(
+            swap > two_subs,
+            "swap {swap} should beat substitutions {two_subs}"
+        );
     }
 
     #[test]
