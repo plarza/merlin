@@ -41,12 +41,16 @@ async fn main() -> Result<()> {
     let mut config_path = PathBuf::from("/var/lib/merlin/config.toml");
     let mut import_from: Option<PathBuf> = None;
     let mut backfill_pages: Option<usize> = None;
+    let mut import_keys: Option<PathBuf> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config" => config_path = args.next().context("--config needs a path")?.into(),
             "--import-memories" => {
                 import_from = Some(args.next().context("--import-memories needs a path")?.into())
+            }
+            "--import-keys" => {
+                import_keys = Some(args.next().context("--import-keys needs a path")?.into())
             }
             "--backfill" => {
                 let pages = args.next().unwrap_or_else(|| "50".into());
@@ -129,6 +133,22 @@ async fn main() -> Result<()> {
 
     let link = matrix::connect(&config, &secrets).await?;
     tracing::info!(user = %config.user_id, "connected");
+
+    if let Some(path) = import_keys {
+        let passphrase = std::env::var("MATRIX_KEY_EXPORT_PASSPHRASE")
+            .context("MATRIX_KEY_EXPORT_PASSPHRASE must hold the passphrase used for the export")?;
+        let result = link
+            .client()
+            .encryption()
+            .import_room_keys(path, &passphrase)
+            .await
+            .map_err(|e| anyhow::anyhow!("importing room keys failed: {e}"))?;
+        println!(
+            "imported {} of {} room keys",
+            result.imported_count, result.total_count
+        );
+        return Ok(());
+    }
 
     if let Some(pages) = backfill_pages {
         // Sync once so the client has joined rooms and whatever keys the
