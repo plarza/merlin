@@ -75,6 +75,24 @@ impl Message {
     }
 }
 
+/// Token counts for one completion, as reported by the provider.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Usage {
+    pub prompt: u64,
+    pub completion: u64,
+}
+
+impl Usage {
+    pub fn total(&self) -> u64 {
+        self.prompt + self.completion
+    }
+}
+
+pub struct Completion {
+    pub message: Message,
+    pub usage: Usage,
+}
+
 pub struct GeneratedImage {
     pub bytes: Vec<u8>,
     pub media_type: String,
@@ -87,8 +105,10 @@ impl Llm {
         image_model: String,
         timeout_s: u64,
     ) -> Result<Self> {
+        // read_timeout applies between reads rather than to the whole response, so a long generation is fine and only a genuine stall fails.
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(timeout_s))
+            .read_timeout(Duration::from_secs(timeout_s))
+            .connect_timeout(Duration::from_secs(20))
             .build()?;
         Ok(Self {
             http,
@@ -98,12 +118,16 @@ impl Llm {
         })
     }
 
-    /// One completion round.
-    /// Returns the assistant message, which may carry tool calls instead of content — the caller runs the loop.
-    pub async fn chat(&self, messages: &[Message], tools: &[Value]) -> Result<Message> {
+    /// One completion round, streamed.
+    ///
+    /// Streaming is what makes a long answer safe: tokens arrive continuously, so the client can use an idle timeout rather than a deadline on the whole response.
+    /// A non-streamed request sends nothing until it is finished, which means a slow generation is indistinguishable from a hang and trips a total timeout.
+    pub async fn chat(&self, messages: &[Message], tools: &[Value]) -> Result<Completion> {
         let mut body = json!({
             "model": self.chat_model,
             "messages": messages,
+            "stream": true,
+            "stream_options": { "include_usage": true },
         });
         if !tools.is_empty() {
             body["tools"] = json!(tools);
@@ -120,32 +144,80 @@ impl Llm {
             .map_err(|e| classify(e, "chat"))?;
 
         let status = resp.status();
-        // Read as text first: reqwest's timeout covers the body, so a slow model surfaces here rather than at send(), and .json() would report it as a parse failure.
-        let raw = resp.text().await.map_err(|e| classify(e, "chat"))?;
-        let payload: Value = serde_json::from_str(&raw).map_err(|e| {
-            anyhow::anyhow!(
-                "OpenRouter chat returned non-JSON ({status}): {e}: {}",
-                head(&raw)
-            )
-        })?;
-
         if !status.is_success() {
-            bail!(
-                "OpenRouter chat {}: {}",
-                status,
-                payload
-                    .pointer("/error/message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown error")
-            );
+            let raw = resp.text().await.unwrap_or_default();
+            bail!("OpenRouter chat {status}: {}", head(&raw));
         }
 
-        let choice = payload
-            .pointer("/choices/0/message")
-            .cloned()
-            .context("chat response had no choices")?;
+        self.collect_stream(resp).await
+    }
 
-        serde_json::from_value(choice).context("parsing assistant message")
+    /// Accumulate one assistant message from server-sent events.
+    async fn collect_stream(&self, resp: reqwest::Response) -> Result<Completion> {
+        use futures_util::StreamExt;
+
+        let mut content = String::new();
+        let mut calls: Vec<ToolCall> = Vec::new();
+        let mut usage = Usage::default();
+        let mut buffer = String::new();
+        let mut stream = resp.bytes_stream();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| classify(e, "chat stream"))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            // Events are separated by newlines; keep any partial line for the next chunk.
+            while let Some(newline) = buffer.find('\n') {
+                let line = buffer[..newline].trim().to_string();
+                buffer.drain(..=newline);
+
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                let data = data.trim();
+                if data == "[DONE]" {
+                    break;
+                }
+                let Ok(event): std::result::Result<Value, _> = serde_json::from_str(data) else {
+                    continue;
+                };
+
+                if let Some(u) = event.get("usage") {
+                    usage.prompt = u
+                        .get("prompt_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(usage.prompt);
+                    usage.completion = u
+                        .get("completion_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(usage.completion);
+                }
+
+                let Some(delta) = event.pointer("/choices/0/delta") else {
+                    continue;
+                };
+                if let Some(text) = delta.get("content").and_then(Value::as_str) {
+                    content.push_str(text);
+                }
+                if let Some(parts) = delta.get("tool_calls").and_then(Value::as_array) {
+                    merge_tool_calls(&mut calls, parts);
+                }
+            }
+        }
+
+        Ok(Completion {
+            message: Message {
+                role: "assistant".into(),
+                content: if content.is_empty() {
+                    None
+                } else {
+                    Some(content)
+                },
+                tool_calls: calls,
+                tool_call_id: None,
+            },
+            usage,
+        })
     }
 
     /// Image generation.
@@ -205,6 +277,35 @@ impl Llm {
             .context("decoding image base64")?;
 
         Ok(GeneratedImage { bytes, media_type })
+    }
+}
+
+/// Tool calls arrive in fragments across events: the name once, the arguments a few characters at a time, each identified by its index.
+fn merge_tool_calls(calls: &mut Vec<ToolCall>, parts: &[Value]) {
+    for part in parts {
+        let index = part.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+        while calls.len() <= index {
+            calls.push(ToolCall {
+                id: String::new(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: String::new(),
+                    arguments: String::new(),
+                },
+            });
+        }
+        let call = &mut calls[index];
+        if let Some(id) = part.get("id").and_then(Value::as_str) {
+            call.id = id.to_string();
+        }
+        if let Some(f) = part.get("function") {
+            if let Some(name) = f.get("name").and_then(Value::as_str) {
+                call.function.name.push_str(name);
+            }
+            if let Some(args) = f.get("arguments").and_then(Value::as_str) {
+                call.function.arguments.push_str(args);
+            }
+        }
     }
 }
 
