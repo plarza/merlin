@@ -18,7 +18,7 @@ pub struct Sandbox {
     runner: Vec<String>,
     timeout: Duration,
     max_output: usize,
-    /// Passed to the wrapper, which owns the cgroup limit.
+    /// Passed to the wrapper as an address-space limit.
     /// Enforcing it here would be advisory only, since the child is a different user.
     memory_max: String,
 }
@@ -53,8 +53,8 @@ impl Sandbox {
         let mut cmd = Command::new(program);
         cmd.args(args)
             .arg(lang)
-            .env("MERLIN_EXEC_MEMORY_MAX", &self.memory_max)
-            .env("MERLIN_EXEC_TIMEOUT", self.timeout.as_secs().to_string())
+            .arg(self.timeout.as_secs().to_string())
+            .arg(address_space_kb(&self.memory_max).to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -96,6 +96,19 @@ impl Sandbox {
             }),
         }
     }
+}
+
+/// Parse a size like `1G` or `512M` into kilobytes for `ulimit -v`.
+/// An unparseable value yields 0, which the wrapper reads as no limit rather than as a limit of nothing.
+fn address_space_kb(size: &str) -> u64 {
+    let raw = size.trim();
+    let (digits, scale) = match raw.chars().last() {
+        Some('G') | Some('g') => (&raw[..raw.len() - 1], 1024 * 1024),
+        Some('M') | Some('m') => (&raw[..raw.len() - 1], 1024),
+        Some('K') | Some('k') => (&raw[..raw.len() - 1], 1),
+        _ => (raw, 1),
+    };
+    digits.trim().parse::<u64>().unwrap_or(0) * scale
 }
 
 fn normalize_language(language: &str) -> Result<&'static str> {

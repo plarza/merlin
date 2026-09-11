@@ -840,3 +840,27 @@ fn paths_cannot_climb_out_of_the_workspace() {
     w.write("/inside.txt", "fine").unwrap();
     assert!(w.root().join("inside.txt").exists());
 }
+
+#[tokio::test]
+async fn the_run_limits_reach_the_sandbox_as_arguments() {
+    // sudo runs with env_reset, so limits passed through the environment never
+    // arrive. They have to travel on argv.
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = scratch("exec-args").join("record");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sb = Sandbox::new(vec![script.display().to_string()], 30, "1G".into());
+    let out = sb.run("python", "print(1)", None).await.unwrap();
+
+    assert_eq!(
+        out.stdout.lines().collect::<Vec<_>>(),
+        vec!["python", "30", "1048576"],
+        "language, timeout in seconds, then the address space limit in kB"
+    );
+}

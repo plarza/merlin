@@ -85,8 +85,11 @@
           text = ''
             set -uo pipefail
 
+            # Taken from argv, not the environment: sudo runs with env_reset,
+            # so anything exported by the caller is stripped before this runs.
             lang="''${1:-bash}"
-            timeout_s="''${MERLIN_EXEC_TIMEOUT:-60}"
+            timeout_s="''${2:-60}"
+            address_space_kb="''${3:-0}"
             root="''${MERLIN_SANDBOX_ROOT:-/var/lib/merlin-sandbox}"
             work="''${MERLIN_WORKSPACE:-/var/lib/merlin-workspace}"
 
@@ -114,6 +117,9 @@
             # and a fork bomb inside the namespace is still host processes.
             ulimit -u 512 || true
             ulimit -f 4194304 || true
+            if [ "$address_space_kb" -gt 0 ]; then
+              ulimit -v "$address_space_kb" || true
+            fi
 
             # --unshare-all drops every namespace, --share-net puts the network
             # back so the agent can fetch and install things. --unshare-user
