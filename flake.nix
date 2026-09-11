@@ -13,6 +13,17 @@
     let
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+
+      # Shared by the dependency build and the crate build, which must agree or
+      # the artifacts are rejected and everything recompiles.
+      craneArgs = pkgs: {
+        src = (crane.mkLib pkgs).cleanCargoSource ./.;
+        strictDeps = true;
+        # aws-lc-sys arrives through rustls, which matrix-sdk selects with no
+        # opt-out. It needs cmake and a C toolchain at build time.
+        nativeBuildInputs = with pkgs; [ pkg-config cmake ];
+        buildInputs = with pkgs; [ openssl ];
+      };
     in
     {
       packages = forAll (pkgs:
@@ -23,31 +34,23 @@
       } // {
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.merlin;
 
-        merlin =
-          let
-            craneLib = crane.mkLib pkgs;
-            commonArgs = {
-              src = craneLib.cleanCargoSource ./.;
-              strictDeps = true;
-              # aws-lc-sys arrives through rustls, which matrix-sdk selects with
-              # no opt-out. It needs cmake and a C toolchain at build time.
-              nativeBuildInputs = with pkgs; [ pkg-config cmake ];
-              buildInputs = with pkgs; [ openssl ];
-            };
-          in
-          craneLib.buildPackage (commonArgs // {
-            pname = "merlin";
-            version = "0.1.0";
-            # Dependencies become their own derivation, keyed on Cargo.lock
-            # rather than on the source, so a code change rebuilds this crate
-            # alone and everything under it comes from the cache.
-            cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-            doCheck = false;
-            meta = {
-              description = "Matrix assistant with memory, tools and scheduled jobs";
-              mainProgram = "merlin";
-            };
-          });
+        # The compiled dependency graph, keyed on Cargo.lock rather than on the
+        # source. Exposed as a package of its own because it is a build input
+        # rather than a runtime one, so it is absent from merlin's closure and
+        # `cachix push .#merlin` would never carry it. Caching this is the whole
+        # point of splitting it out.
+        merlin-deps = (crane.mkLib pkgs).buildDepsOnly (craneArgs pkgs);
+
+        merlin = (crane.mkLib pkgs).buildPackage (craneArgs pkgs // {
+          pname = "merlin";
+          version = "0.1.0";
+          cargoArtifacts = self.packages.${pkgs.stdenv.hostPlatform.system}.merlin-deps;
+          doCheck = false;
+          meta = {
+            description = "Matrix assistant with memory, tools and scheduled jobs";
+            mainProgram = "merlin";
+          };
+        });
 
       });
 
