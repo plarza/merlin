@@ -16,7 +16,7 @@ tokio = { version = "1.53", features = [
     "process",
 ] }
 anyhow = "1.0.104"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "limits"] }
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "rustls",

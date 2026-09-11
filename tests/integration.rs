@@ -256,6 +256,11 @@ fn sql_queries_can_read_everything_and_write_nothing() {
             .contains("No rows")
     );
     assert!(db::query(&db, "SELECT nonsense syntax(", 50).is_err());
+
+    assert!(
+        db::query(&db, "ATTACH DATABASE '/tmp/other.db' AS other", 50).is_err(),
+        "attaching another database must be refused"
+    );
 }
 
 fn vector(x: f32, y: f32, z: f32) -> Vec<f32> {
@@ -775,6 +780,34 @@ fn paths_cannot_climb_out_of_the_workspace() {
     }
     w.write("/inside.txt", "fine").unwrap();
     assert!(w.root().join("inside.txt").exists());
+}
+
+#[test]
+fn paths_cannot_leave_through_a_symlink_the_sandbox_planted() {
+    let w = workspace("ws-symlink");
+    let outside = scratch("ws-symlink-outside");
+    std::os::unix::fs::symlink(&outside, w.root().join("escape")).unwrap();
+
+    assert!(w.write("escape/loot.txt", "nope").is_err());
+    assert!(w.write("escape", "nope").is_err());
+    assert!(!outside.join("loot.txt").exists());
+}
+
+#[test]
+fn fetches_are_refused_when_the_host_is_not_public() {
+    for attempt in [
+        "http://127.0.0.1:5000/v2/_catalog",
+        "http://10.0.0.5/",
+        "http://192.168.1.1/",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://[::1]:3001/",
+        "file:///etc/passwd",
+    ] {
+        assert!(
+            merlin::tools::public_url(attempt).is_err(),
+            "{attempt} should have been refused"
+        );
+    }
 }
 
 #[tokio::test]

@@ -142,10 +142,18 @@ impl Runtime {
                 config.limits.exec_timeout_s,
                 config.limits.exec_memory_max.clone(),
             )),
-            llm: Arc::clone(&llm),
             images: Arc::clone(&images),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(config.limits.request_timeout_s))
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if attempt.previous().len() >= 10 {
+                        return attempt.stop();
+                    }
+                    match merlin::tools::public_url(attempt.url().as_str()) {
+                        Ok(_) => attempt.follow(),
+                        Err(e) => attempt.error(e),
+                    }
+                }))
                 .build()?,
             exa_key: secrets.exa_api_key.clone(),
             embedder: Arc::clone(&embedder),

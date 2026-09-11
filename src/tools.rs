@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 use crate::agent::Progress;
@@ -8,7 +9,6 @@ use crate::cron::Job;
 use crate::embed::Embedder;
 use crate::exec::Sandbox;
 use crate::image::ImageGen;
-use crate::llm::Llm;
 use crate::workspace::{Edit, Workspace};
 use crate::{cron, db, memory, messages};
 
@@ -16,7 +16,6 @@ pub struct Tools {
     pub db: Arc<Mutex<rusqlite::Connection>>,
     pub sandbox: Arc<Sandbox>,
     pub workspace: Arc<Workspace>,
-    pub llm: Arc<Llm>,
     pub images: Arc<ImageGen>,
     pub http: reqwest::Client,
     pub exa_key: Option<String>,
@@ -353,11 +352,21 @@ impl Tools {
     }
 
     async fn web_fetch(&self, args: &Value) -> Result<Outcome> {
-        let url = str_arg(args, "url")?;
-        let body = self
-            .fetch_capped(reqwest::Method::GET, &url, None, None)
-            .await?;
-        let text = html2text::from_read(body.as_bytes(), 100).unwrap_or_else(|_| body.clone());
+        let url = public_url(&str_arg(args, "url")?)?;
+        let resp = self.http.get(url).send().await.context("request failed")?;
+        let status = resp.status();
+        let cap = self.config.limits.max_response_bytes;
+        let bytes = resp.bytes().await.context("reading response body")?;
+        anyhow::ensure!(bytes.len() <= cap, "response over the {cap} byte cap");
+
+        let body = String::from_utf8_lossy(&bytes);
+        if !status.is_success() {
+            return Ok(Outcome::Text(format!(
+                "HTTP {status}\n{}",
+                crate::truncate(&body, 2000)
+            )));
+        }
+        let text = html2text::from_read(body.as_bytes(), 100).unwrap_or_else(|_| body.to_string());
         Ok(Outcome::Text(crate::truncate(&text, 12_000)))
     }
 
@@ -462,48 +471,38 @@ impl Tools {
             }
         }
     }
+}
 
-    async fn fetch_capped(
-        &self,
-        method: reqwest::Method,
-        url: &str,
-        headers: Option<Value>,
-        body: Option<String>,
-    ) -> Result<String> {
-        let parsed = reqwest::Url::parse(url).context("invalid URL")?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            anyhow::bail!("only http and https are permitted");
+pub fn public_url(url: &str) -> Result<reqwest::Url> {
+    let parsed = reqwest::Url::parse(url).context("invalid URL")?;
+    anyhow::ensure!(
+        matches!(parsed.scheme(), "http" | "https"),
+        "only http and https are permitted"
+    );
+    match parsed
+        .socket_addrs(|| None)
+        .context("resolving the host")?
+        .iter()
+        .find(|a| is_internal(a.ip()))
+    {
+        Some(a) => anyhow::bail!("that host resolves to {}, which is not public", a.ip()),
+        None => Ok(parsed),
+    }
+}
+
+fn is_internal(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
         }
-
-        let mut req = self.http.request(method, parsed);
-        if let Some(Value::Object(map)) = headers {
-            for (k, v) in map {
-                if let Some(v) = v.as_str() {
-                    req = req.header(k, v);
-                }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_internal(v4.into()),
+            None => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || matches!(v6.segments()[0] & 0xfe00, 0xfc00 | 0xfe00)
             }
-        }
-        if let Some(b) = body {
-            req = req.body(b);
-        }
-
-        let resp = req.send().await.context("request failed")?;
-        let status = resp.status();
-        let bytes = resp.bytes().await.context("reading response body")?;
-
-        if bytes.len() > self.config.limits.max_response_bytes {
-            anyhow::bail!(
-                "response was {} bytes, over the {} byte cap",
-                bytes.len(),
-                self.config.limits.max_response_bytes
-            );
-        }
-
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        if !status.is_success() {
-            return Ok(format!("HTTP {status}\n{}", crate::truncate(&text, 2000)));
-        }
-        Ok(text)
+        },
     }
 }
 

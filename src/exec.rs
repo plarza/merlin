@@ -7,7 +7,6 @@ use tokio::process::Command;
 pub struct Sandbox {
     runner: Vec<String>,
     timeout: Duration,
-    max_output: usize,
     memory_max: String,
 }
 
@@ -25,7 +24,6 @@ impl Sandbox {
         Self {
             runner,
             timeout: Duration::from_secs(timeout_s),
-            max_output: MAX_OUTPUT,
             memory_max,
         }
     }
@@ -58,8 +56,8 @@ impl Sandbox {
             Ok(result) => {
                 let out = result.context("collecting sandbox output")?;
                 Ok(Output {
-                    stdout: crate::truncate(&String::from_utf8_lossy(&out.stdout), self.max_output),
-                    stderr: crate::truncate(&String::from_utf8_lossy(&out.stderr), self.max_output),
+                    stdout: crate::truncate(&String::from_utf8_lossy(&out.stdout), MAX_OUTPUT),
+                    stderr: crate::truncate(&String::from_utf8_lossy(&out.stderr), MAX_OUTPUT),
                     exit_code: out.status.code(),
                     timed_out: false,
                 })

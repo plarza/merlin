@@ -95,12 +95,6 @@ pub struct Usage {
     pub completion: u64,
 }
 
-impl Usage {
-    pub fn total(&self) -> u64 {
-        self.prompt + self.completion
-    }
-}
-
 pub struct Completion {
     pub message: Message,
     pub usage: Usage,

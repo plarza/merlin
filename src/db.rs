@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, limits::Limit};
 use std::path::Path;
 
 use crate::embed;
@@ -71,13 +71,6 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
 );
 "#;
 
-pub const SCHEMA_SUMMARY: &str = "\
-memories(id, key, content, category, room_id, created_at, updated_at)
-messages(event_id, room_id, sender, body, at)
-cron_jobs(name, schedule, timezone, prompt, room_id, enabled, created_at, last_run, last_status)
-memories_fts(key, content), messages_fts(body), messages_trigram(body) — FTS5, use MATCH
-memory_vectors(memory_rowid, embedding), message_vectors(message_rowid, embedding) — sqlite-vec";
-
 pub fn open(path: &Path) -> Result<Connection> {
     embed::register();
     if let Some(dir) = path.parent() {
@@ -87,6 +80,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         .with_context(|| format!("opening database at {}", path.display()))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.execute_batch(SCHEMA).context("creating schema")?;
+    conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
     Ok(conn)
 }
 
@@ -110,6 +104,7 @@ pub fn migrate_from_split_files(conn: &mut Connection, state_dir: &Path) -> Resu
     ];
 
     let mut moved = 0usize;
+    conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 1)?;
     for (file, table, columns) in sources {
         let old = state_dir.join(file);
         if !old.exists() {
@@ -135,6 +130,8 @@ pub fn migrate_from_split_files(conn: &mut Connection, state_dir: &Path) -> Resu
             std::fs::remove_file(state_dir.join(format!("{file}{suffix}"))).ok();
         }
     }
+
+    conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
     Ok(moved)
 }
 

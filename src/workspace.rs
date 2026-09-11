@@ -14,6 +14,9 @@ impl Workspace {
     pub fn new(root: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&root)
             .with_context(|| format!("creating workspace at {}", root.display()))?;
+        let root = root
+            .canonicalize()
+            .with_context(|| format!("resolving workspace at {}", root.display()))?;
         Ok(Self { root })
     }
 
@@ -29,16 +32,9 @@ impl Workspace {
                 Component::CurDir => {}
                 _ => anyhow::bail!("'{path}' must stay inside the workspace"),
             }
-        }
-
-        if let Ok(real) = out.canonicalize()
-            && !real.starts_with(
-                self.root
-                    .canonicalize()
-                    .unwrap_or_else(|_| self.root.clone()),
-            )
-        {
-            anyhow::bail!("'{path}' resolves outside the workspace");
+            if out.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+                anyhow::bail!("'{path}' passes through a symlink");
+            }
         }
         Ok(out)
     }
