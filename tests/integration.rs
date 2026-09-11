@@ -902,3 +902,72 @@ fn a_tool_call_is_logged_with_enough_to_identify_it() {
         "a realistic query must survive whole: {logged}"
     );
 }
+
+#[test]
+fn an_image_provider_is_named_not_guessed() {
+    use merlin::image::Provider;
+
+    assert_eq!(
+        "openrouter".parse::<Provider>().unwrap(),
+        Provider::OpenRouter
+    );
+    // The name appears in config, in fal's own docs and in its model ids, and
+    // they do not agree on punctuation.
+    for spelling in ["fal", "fal.ai", "fal-ai", "  FAL  "] {
+        assert_eq!(
+            spelling.parse::<Provider>().unwrap(),
+            Provider::Fal,
+            "{spelling} should select fal"
+        );
+    }
+
+    // A typo must not quietly fall back to a provider that then bills for the
+    // wrong model, so an unknown name is a startup failure.
+    let err = "falai".parse::<Provider>().unwrap_err().to_string();
+    assert!(err.contains("falai"), "got: {err}");
+}
+
+#[test]
+fn choosing_fal_without_a_key_fails_at_startup() {
+    // Rather than at the moment someone asks for a picture, which is both later
+    // and harder to read as a configuration mistake.
+    // Matched rather than unwrap_err'd: that would need Debug on ImageGen, which
+    // holds two API keys and should not have a formatter that prints them.
+    let err = match merlin::image::ImageGen::new(
+        merlin::image::Provider::Fal,
+        "fal-ai/z-image/turbo".into(),
+        "openrouter-key".into(),
+        None,
+        60,
+    ) {
+        Ok(_) => panic!("fal with no key must not construct"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("FAL_API_KEY"), "got: {err}");
+
+    // OpenRouter is unaffected by a missing fal key.
+    assert!(
+        merlin::image::ImageGen::new(
+            merlin::image::Provider::OpenRouter,
+            "meta/muse-image".into(),
+            "openrouter-key".into(),
+            None,
+            60,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_fal_model_id_becomes_a_path() {
+    // fal routes by path, so the slashes in the id are structural. Collapsing
+    // them into one segment, or leaving a leading one, is a 404.
+    assert_eq!(
+        merlin::image::fal_endpoint("fal-ai/z-image/turbo"),
+        "https://fal.run/fal-ai/z-image/turbo"
+    );
+    assert_eq!(
+        merlin::image::fal_endpoint("/fal-ai/z-image/turbo/"),
+        "https://fal.run/fal-ai/z-image/turbo"
+    );
+}

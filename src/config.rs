@@ -50,6 +50,10 @@ pub struct ModelConfig {
     pub chat: String,
     #[serde(default = "default_image_model")]
     pub image: String,
+    /// Which service generates images. Chat and embeddings are OpenRouter either
+    /// way; this only moves image generation.
+    #[serde(default = "default_image_provider")]
+    pub image_provider: String,
     /// How much of the token budget the model may spend thinking.
     /// "low" keeps tool-heavy turns responsive; "default" leaves it to the provider.
     #[serde(default = "default_reasoning_effort")]
@@ -103,6 +107,8 @@ pub struct Secrets {
     pub session_encryption_key: String,
     pub openrouter_api_key: String,
     pub exa_api_key: Option<String>,
+    /// Only needed when image_provider is "fal".
+    pub fal_api_key: Option<String>,
 }
 
 impl Config {
@@ -165,6 +171,9 @@ impl Secrets {
                 .unwrap_or_else(|| req("MATRIX_PASSWORD").unwrap_or_default()),
             openrouter_api_key: req("OPENROUTER_API_KEY")?,
             exa_api_key: opt("EXA_API_KEY"),
+            // FAL_KEY is the name fal's own tooling uses, so accept it too rather
+            // than making this the one host where the documented variable is wrong.
+            fal_api_key: opt("FAL_API_KEY").or_else(|| opt("FAL_KEY")),
         })
     }
 }
@@ -212,6 +221,7 @@ defaults! {
     default_timezone           -> String  = "Australia/Sydney";
     default_chat_model         -> String  = "z-ai/glm-5.3-flash";
     default_image_model        -> String  = "meta/muse-image";
+    default_image_provider     -> String  = "openrouter";
     default_reasoning_effort   -> String  = "medium";
     default_embedding_model    -> String  = "google/gemini-embedding-001";
     default_embedding_dimensions -> usize = 768usize;

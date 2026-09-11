@@ -10,6 +10,7 @@ use merlin::agent::Agent;
 use merlin::config::{Config, Secrets};
 use merlin::embed::{Embedder, Memories, Messages};
 use merlin::exec::Sandbox;
+use merlin::image::ImageGen;
 use merlin::llm::Llm;
 use merlin::matrix::Bot;
 use merlin::room::{Buffers, Turn};
@@ -98,10 +99,22 @@ impl Runtime {
         let llm = Arc::new(Llm::new(
             secrets.openrouter_api_key.clone(),
             config.model.chat.clone(),
-            config.model.image.clone(),
             config.model.reasoning_effort.clone(),
             config.limits.request_timeout_s,
         )?);
+
+        let images = Arc::new(ImageGen::new(
+            config.model.image_provider.parse()?,
+            config.model.image.clone(),
+            secrets.openrouter_api_key.clone(),
+            secrets.fal_api_key.clone(),
+            config.limits.request_timeout_s,
+        )?);
+        tracing::info!(
+            provider = ?images.provider(),
+            model = images.model(),
+            "image generation ready"
+        );
 
         let embedder = Arc::new(Embedder::new(
             secrets.openrouter_api_key.clone(),
@@ -137,6 +150,7 @@ impl Runtime {
                 config.limits.exec_memory_max.clone(),
             )),
             llm: Arc::clone(&llm),
+            images: Arc::clone(&images),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(config.limits.request_timeout_s))
                 .build()?,

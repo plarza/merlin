@@ -12,6 +12,7 @@ use crate::config::Config;
 use crate::cron::Job;
 use crate::embed::Embedder;
 use crate::exec::Sandbox;
+use crate::image::ImageGen;
 use crate::llm::Llm;
 use crate::workspace::{Edit, Workspace};
 use crate::{cron, db, memory, messages};
@@ -21,6 +22,7 @@ pub struct Tools {
     pub sandbox: Arc<Sandbox>,
     pub workspace: Arc<Workspace>,
     pub llm: Arc<Llm>,
+    pub images: Arc<ImageGen>,
     pub http: reqwest::Client,
     pub exa_key: Option<String>,
     pub embedder: Arc<Embedder>,
@@ -414,8 +416,8 @@ impl Tools {
     async fn generate_image(&self, args: &Value) -> Result<Outcome> {
         let prompt = str_arg(args, "prompt")?;
         let image = self
-            .llm
-            .image(&prompt, args.get("model").and_then(Value::as_str))
+            .images
+            .generate(&prompt, args.get("model").and_then(Value::as_str))
             .await?;
         Ok(Outcome::Image {
             bytes: image.bytes,

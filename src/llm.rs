@@ -1,22 +1,20 @@
 //! OpenRouter client.
 //!
-//! Two endpoints, one key.
-//! Text goes through `/chat/completions` with function calling.
-//! Images go through `/images`; image models are absent from the chat model list and return 404 from `/chat/completions`.
+//! Text goes through `/chat/completions` with function calling, and embeddings
+//! through their own endpoint. Image generation lives in `image`, which may be
+//! pointed at a different provider entirely.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::Duration;
 
 const CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const IMAGE_URL: &str = "https://openrouter.ai/api/v1/images";
 
 pub struct Llm {
     http: reqwest::Client,
     api_key: String,
     chat_model: String,
-    image_model: String,
     reasoning_effort: String,
 }
 
@@ -127,16 +125,10 @@ pub struct Attachment {
     pub media_type: String,
 }
 
-pub struct GeneratedImage {
-    pub bytes: Vec<u8>,
-    pub media_type: String,
-}
-
 impl Llm {
     pub fn new(
         api_key: String,
         chat_model: String,
-        image_model: String,
         reasoning_effort: String,
         timeout_s: u64,
     ) -> Result<Self> {
@@ -149,7 +141,6 @@ impl Llm {
             http,
             api_key,
             chat_model,
-            image_model,
             reasoning_effort,
         })
     }
@@ -277,65 +268,6 @@ impl Llm {
             },
             usage,
         })
-    }
-
-    /// Image generation.
-    /// A separate endpoint with a prompt rather than a message list; returns base64 plus the media type to upload as.
-    pub async fn image(&self, prompt: &str, model: Option<&str>) -> Result<GeneratedImage> {
-        let body = json!({
-            "model": model.unwrap_or(&self.image_model),
-            "prompt": prompt,
-        });
-
-        let resp = self
-            .http
-            .post(IMAGE_URL)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| classify(e, "images"))?;
-
-        let status = resp.status();
-        let raw = resp.text().await.map_err(|e| classify(e, "images"))?;
-        let payload: Value = serde_json::from_str(&raw).map_err(|e| {
-            anyhow::anyhow!(
-                "OpenRouter images returned non-JSON ({status}): {e}: {}",
-                head(&raw)
-            )
-        })?;
-
-        if !status.is_success() {
-            bail!(
-                "OpenRouter images {}: {}",
-                status,
-                payload
-                    .pointer("/error/message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown error")
-            );
-        }
-
-        let first = payload
-            .pointer("/data/0")
-            .context("image response had no data")?;
-
-        let b64 = first
-            .get("b64_json")
-            .and_then(Value::as_str)
-            .context("image response had no b64_json")?;
-        let media_type = first
-            .get("media_type")
-            .and_then(Value::as_str)
-            .unwrap_or("image/png")
-            .to_string();
-
-        use base64::Engine;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(b64)
-            .context("decoding image base64")?;
-
-        Ok(GeneratedImage { bytes, media_type })
     }
 }
 

@@ -8,6 +8,7 @@ pub mod db;
 pub mod dream;
 pub mod embed;
 pub mod exec;
+pub mod image;
 pub mod llm;
 pub mod matrix;
 pub mod memory;

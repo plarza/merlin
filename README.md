@@ -71,7 +71,8 @@ timezone        = "Australia/Sydney"
 [model]
 chat                 = "z-ai/glm-5.3-flash"
 reasoning_effort     = "medium"
-image                = "meta/muse-image"
+image                = "fal-ai/z-image/turbo"
+image_provider       = "fal"
 embedding            = "google/gemini-embedding-001"
 embedding_dimensions = 768
 
@@ -89,6 +90,7 @@ embed_batch        = 32
 | `MATRIX_PASSWORD` | yes |
 | `OPENROUTER_API_KEY` | yes |
 | `EXA_API_KEY` | for `web_search` |
+| `FAL_API_KEY` | when `image_provider = "fal"` (`FAL_KEY` also accepted) |
 | `MATRIX_RECOVERY_PASSPHRASE` | for key backup recovery |
 | `MERLIN_ALLOWED_ROOMS`, `MERLIN_ALLOWED_SENDERS` | override the config file |
 | `MERLIN_EXEC_RUNNER` | override the sandbox command |
