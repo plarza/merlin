@@ -158,7 +158,23 @@ impl Llm {
     ///
     /// Streaming is what makes a long answer safe: tokens arrive continuously, so the client can use an idle timeout rather than a deadline on the whole response.
     /// A non-streamed request sends nothing until it is finished, which means a slow generation is indistinguishable from a hang and trips a total timeout.
+    /// One completion round, retried once on a failure that is plausibly transient.
+    ///
+    /// A gateway error or an idle timeout ends a turn with nothing to show for the tokens already spent, and both are common enough to be worth absorbing.
+    /// A refusal, a bad request or a rate limit is returned immediately, since repeating it would only fail again.
     pub async fn chat(&self, messages: &[Message], tools: &[Value]) -> Result<Completion> {
+        match self.chat_once(messages, tools).await {
+            Ok(completion) => Ok(completion),
+            Err(e) if is_transient(&e) => {
+                tracing::warn!(error = %e, "chat failed; retrying once");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                self.chat_once(messages, tools).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn chat_once(&self, messages: &[Message], tools: &[Value]) -> Result<Completion> {
         let mut body = json!({
             "model": self.chat_model,
             "messages": messages,
@@ -350,6 +366,17 @@ fn merge_tool_calls(calls: &mut Vec<ToolCall>, parts: &[Value]) {
             }
         }
     }
+}
+
+/// Whether a failure is worth repeating.
+/// Matched on the text because the underlying reqwest error is consumed by `classify` before it reaches here, and the status codes are the ones that mean "ask again later".
+fn is_transient(e: &anyhow::Error) -> bool {
+    let text = e.to_string();
+    text.contains("timed out")
+        || text.contains("could not reach")
+        || ["500", "502", "503", "504"]
+            .iter()
+            .any(|code| text.contains(&format!("chat {code}")))
 }
 
 /// Distinguishes a timeout from a connection failure, which need different responses.

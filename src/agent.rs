@@ -11,6 +11,9 @@ pub struct Agent {
     pub tools: Arc<Tools>,
     pub soul: String,
     pub max_iterations: usize,
+    /// Wall-clock ceiling for one turn.
+    /// The iteration count alone does not bound anything: thirty-two rounds each running code for five minutes is hours.
+    pub max_duration: std::time::Duration,
     pub timezone: chrono_tz::Tz,
 }
 
@@ -73,7 +76,16 @@ impl Agent {
         let tool_defs = definitions();
         let mut result = TurnResult::default();
 
+        let deadline = std::time::Instant::now() + self.max_duration;
+
         for round in 0..self.max_iterations {
+            // Checked between rounds rather than enforced with a timeout around the whole turn,
+            // so an overrunning turn still answers with what it has instead of being cut off mid-tool.
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(round, "turn exceeded its time budget");
+                break;
+            }
+
             let completion = self.llm.chat(&messages, &tool_defs).await?;
             result.prompt_tokens += completion.usage.prompt;
             result.completion_tokens += completion.usage.completion;
@@ -123,13 +135,13 @@ impl Agent {
             }
         }
 
-        // Out of iterations.
+        // Out of steps or out of time.
         // Rather than reporting the limit, which tells the user nothing, ask for an answer from what was already gathered.
         // Tools are withheld from this call so the model cannot spend another round.
         messages.push(Message::user(
-            "You have used all available tool steps. Answer now with what you \
-             have already found, and say plainly which parts you could not \
-             confirm. Do not request more tools.",
+            "You have used all the time or tool steps available. Answer now with \
+             what you have already found, and say plainly which parts you could \
+             not confirm. Do not request more tools.",
         ));
 
         let forced = self.llm.chat(&messages, &[]).await?;
@@ -139,7 +151,7 @@ impl Agent {
 
         if result.text.is_empty() {
             result.text =
-                "I hit the tool limit before finding an answer. Narrow the question and I'll retry."
+                "I ran out of steps before finding an answer. Narrow the question and I'll retry."
                     .to_string();
         }
         Ok(result)

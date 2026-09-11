@@ -36,6 +36,9 @@ pub struct Config {
     #[serde(default)]
     pub limits: Limits,
 
+    #[serde(default)]
+    pub dreaming: Dreaming,
+
     /// Where session, memory and cron state live.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
@@ -69,11 +72,24 @@ pub struct Limits {
     pub request_timeout_s: u64,
     #[serde(default = "default_exec_timeout_s")]
     pub exec_timeout_s: u64,
+    /// Wall-clock ceiling for one turn, checked between tool rounds.
+    #[serde(default = "default_turn_timeout_s")]
+    pub turn_timeout_s: u64,
     #[serde(default = "default_exec_memory_max")]
     pub exec_memory_max: String,
     /// Rows sent to the embedding endpoint per request.
     #[serde(default = "default_embed_batch")]
     pub embed_batch: usize,
+}
+
+/// The nightly memory consolidation pass.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Dreaming {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 5-field cron expression, in the configured timezone.
+    #[serde(default = "default_dream_schedule")]
+    pub schedule: String,
 }
 
 /// Credentials, read from the environment only.
@@ -204,6 +220,9 @@ defaults! {
     default_tool_iterations    -> usize   = 32usize;
     default_request_timeout_s  -> u64     = 120u64;
     default_exec_timeout_s     -> u64     = 60u64;
+    default_turn_timeout_s     -> u64     = 600u64;
+    default_dream_schedule     -> String  = "0 5 * * *";
+    default_true               -> bool    = true;
     default_exec_memory_max    -> String  = "1G";
     default_state_dir          -> PathBuf = PathBuf::from("/var/lib/merlin");
 }
@@ -219,4 +238,4 @@ macro_rules! default_via_serde {
     };
 }
 
-default_via_serde!(ModelConfig, Limits);
+default_via_serde!(ModelConfig, Limits, Dreaming);
