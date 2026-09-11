@@ -3,9 +3,13 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    # Splits dependency compilation from crate compilation. buildRustPackage puts
+    # both in one derivation, so editing one line rebuilt all four hundred
+    # dependencies, which is the whole of the fourteen minute build.
+    crane.url = "github:ipetkov/crane";
   };
 
-  outputs = { self, nixpkgs, ... }:
+  outputs = { self, nixpkgs, crane, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
@@ -19,22 +23,31 @@
       } // {
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.merlin;
 
-        merlin = pkgs.rustPlatform.buildRustPackage {
-          pname = "merlin";
-          version = "0.1.0";
-          src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-
-          # aws-lc-sys arrives through rustls, which matrix-sdk selects with no
-          # opt-out. It needs cmake and a C toolchain at build time.
-          nativeBuildInputs = with pkgs; [ pkg-config cmake ];
-          buildInputs = with pkgs; [ openssl ];
-
-          meta = {
-            description = "Matrix assistant with memory, tools and scheduled jobs";
-            mainProgram = "merlin";
-          };
-        };
+        merlin =
+          let
+            craneLib = crane.mkLib pkgs;
+            commonArgs = {
+              src = craneLib.cleanCargoSource ./.;
+              strictDeps = true;
+              # aws-lc-sys arrives through rustls, which matrix-sdk selects with
+              # no opt-out. It needs cmake and a C toolchain at build time.
+              nativeBuildInputs = with pkgs; [ pkg-config cmake ];
+              buildInputs = with pkgs; [ openssl ];
+            };
+          in
+          craneLib.buildPackage (commonArgs // {
+            pname = "merlin";
+            version = "0.1.0";
+            # Dependencies become their own derivation, keyed on Cargo.lock
+            # rather than on the source, so a code change rebuilds this crate
+            # alone and everything under it comes from the cache.
+            cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+            doCheck = false;
+            meta = {
+              description = "Matrix assistant with memory, tools and scheduled jobs";
+              mainProgram = "merlin";
+            };
+          });
 
       });
 
