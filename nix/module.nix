@@ -193,6 +193,10 @@ in
           tar -xzf ${rootfsTarball} -C "$root"
           chown -R merlin-exec:merlin-exec "$root"
         fi
+
+        # The tarball carries its own mode for ".", which overwrites the tmpfiles
+        # rule and leaves the root world-readable. Reassert it after extracting.
+        chmod 0700 "$root"
         install -m 0644 ${sandboxResolvConf} "$root/etc/resolv.conf"
         chown merlin-exec:merlin-exec "$root/etc/resolv.conf"
         mkdir -p "$root/work"
