@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use std::time::Duration;
 
 use mxlink::matrix_sdk::Room;
 use mxlink::matrix_sdk::media::{MediaFormat, MediaRequestParameters};
@@ -20,6 +21,9 @@ use crate::agent::{Agent, Incoming};
 use crate::config::{Config, Secrets};
 use crate::llm::Attachment;
 use crate::room::{Buffers, Turn, is_addressed};
+
+/// A typing notice carries a four second timeout, so one sent at the start of a turn stops showing long before the work is done. Refreshed just inside that window, which is also the shortest interval the SDK will send on.
+const TYPING_REFRESH: Duration = Duration::from_secs(3);
 
 /// A file that arrived with a message.
 struct Attached {
@@ -256,9 +260,17 @@ impl Bot {
             None => Vec::new(),
         };
 
-        if room.typing_notice(true).await.is_err() {
-            tracing::debug!("could not send typing notice");
-        }
+        let typing = {
+            let room = room.clone();
+            tokio::spawn(async move {
+                loop {
+                    if room.typing_notice(true).await.is_err() {
+                        tracing::debug!("could not send typing notice");
+                    }
+                    tokio::time::sleep(TYPING_REFRESH).await;
+                }
+            })
+        };
 
         // Intermediate messages are posted as they arrive rather than collected,
         // so a long task reads as progress instead of a minute of silence.
@@ -293,6 +305,8 @@ impl Bot {
         // Closing the channel and waiting for the pump guarantees every update has landed before the final answer follows it.
         drop(progress);
         let _ = pump.await;
+        // Stopped before the notice is cleared, so a refresh cannot land after it and leave the indicator stuck on.
+        typing.abort();
         let _ = room.typing_notice(false).await;
 
         let ms = started.elapsed().as_millis() as u64;

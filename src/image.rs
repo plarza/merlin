@@ -205,10 +205,7 @@ impl ImageGen {
     }
 }
 
-/// fal addresses a model by path, so `fal-ai/z-image/turbo` is three segments and
-/// not a single opaque id. Slashes are trimmed because a leading one would produce
-/// a double slash that fal answers with a 404 rather than a useful complaint.
-pub fn fal_endpoint(model: &str) -> String {
+fn fal_endpoint(model: &str) -> String {
     format!("{FAL_URL}/{}", model.trim_matches('/'))
 }
 
