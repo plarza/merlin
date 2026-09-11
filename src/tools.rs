@@ -194,7 +194,7 @@ impl Tools {
     pub async fn dispatch(&self, name: &str, args: &Value, ctx: &Ctx<'_>) -> Outcome {
         match self.run(name, args, ctx).await {
             Ok(outcome) => outcome,
-            Err(e) => Outcome::Text(format!("Error from {name}: {e}")),
+            Err(e) => Outcome::Text(format!("Error from {name}: {e:#}")),
         }
     }
 

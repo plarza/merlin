@@ -250,6 +250,14 @@ in
       };
 
       environment.RUST_LOG = lib.mkDefault "merlin=info,warn";
+
+      # Spelled out rather than left to merlin's default of bare `sudo`, which
+      # cannot work here for two reasons: a systemd unit's PATH holds neither
+      # /run/wrappers/bin nor any other sudo, and the sudoers rule above names
+      # the wrapper by store path, which the /run/current-system symlink does
+      # not match. Deriving both sides from sandboxWrapper keeps them in step.
+      environment.MERLIN_EXEC_RUNNER =
+        "${config.security.wrapperDir}/sudo -n -u merlin-exec ${lib.getExe sandboxWrapper}";
     };
   };
 }
