@@ -9,18 +9,15 @@ use std::sync::{Arc, Mutex};
 
 use crate::agent::Progress;
 use crate::config::Config;
-use crate::cron::{CronStore, Job};
+use crate::cron::Job;
 use crate::embed::Embedder;
 use crate::exec::Sandbox;
 use crate::llm::Llm;
-use crate::memory::Memory;
-use crate::messages::Archive;
 use crate::workspace::{Edit, Workspace};
+use crate::{cron, db, memory, messages};
 
 pub struct Tools {
-    pub memory: Arc<Mutex<Memory>>,
-    pub archive: Arc<Mutex<Archive>>,
-    pub cron: Arc<Mutex<CronStore>>,
+    pub db: Arc<Mutex<rusqlite::Connection>>,
     pub sandbox: Arc<Sandbox>,
     pub workspace: Arc<Workspace>,
     pub llm: Arc<Llm>,
@@ -199,6 +196,18 @@ pub fn definitions() -> Vec<Value> {
             }),
         ),
         f(
+            "sql_query",
+            "Run a read-only SQL query against merlin's database, which holds memories, the full message archive and the scheduled jobs in one file. Use this for counting, grouping, joining and any question the search tools do not shape well, such as who sends the most messages or what was stored in a given week. Schema:\n\nmemories(id, key, content, category, room_id, created_at, updated_at)\nmessages(event_id, room_id, sender, body, at)\ncron_jobs(name, schedule, timezone, prompt, room_id, enabled, created_at, last_run, last_status)\n\nSELECT, WITH and EXPLAIN only; writes are refused. Use memory_store and cron_create to change things.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "A single SELECT, WITH or EXPLAIN statement" },
+                    "limit": { "type": "integer", "description": "Max rows returned, default 50" }
+                },
+                "required": ["query"]
+            }),
+        ),
+        f(
             "cron_create",
             "Schedule a recurring job. The prompt runs as a normal turn at each firing and the result is posted to this room.",
             json!({
@@ -211,11 +220,6 @@ pub fn definitions() -> Vec<Value> {
                 },
                 "required": ["name", "schedule", "prompt"]
             }),
-        ),
-        f(
-            "cron_list",
-            "List the scheduled jobs that exist, with their schedules and prompts. Check here before creating one, so an existing job is edited rather than duplicated.",
-            json!({ "type": "object", "properties": {} }),
         ),
         f(
             "cron_delete",
@@ -251,10 +255,12 @@ impl Tools {
                 let query = str_arg(args, "query")?;
                 let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
                 let vector = self.embed_loose(&query).await;
-                let hits = {
-                    let mem = self.memory.lock().unwrap();
-                    mem.recall(&query, vector.as_deref(), limit.clamp(1, 25))?
-                };
+                let hits = memory::recall(
+                    &self.db.lock().unwrap(),
+                    &query,
+                    vector.as_deref(),
+                    limit.clamp(1, 25),
+                )?;
                 if hits.is_empty() {
                     return Ok(Outcome::Text(format!("No memories matched '{query}'.")));
                 }
@@ -268,19 +274,19 @@ impl Tools {
                     .get("category")
                     .and_then(Value::as_str)
                     .unwrap_or("core");
-                {
-                    let mem = self.memory.lock().unwrap();
-                    mem.store(&key, &content, category, Some(ctx.room_id))?;
-                }
+                memory::store(
+                    &self.db.lock().unwrap(),
+                    &key,
+                    &content,
+                    category,
+                    Some(ctx.room_id),
+                )?;
                 Ok(Outcome::Text(format!("Stored under '{key}'.")))
             }
 
             "memory_forget" => {
                 let key = str_arg(args, "key")?;
-                let gone = {
-                    let mem = self.memory.lock().unwrap();
-                    mem.forget(&key)?
-                };
+                let gone = memory::forget(&self.db.lock().unwrap(), &key)?;
                 Ok(Outcome::Text(if gone {
                     format!("Deleted '{key}'.")
                 } else {
@@ -292,10 +298,12 @@ impl Tools {
                 let query = str_arg(args, "query")?;
                 let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
                 let vector = self.embed_loose(&query).await;
-                let hits = {
-                    let a = self.archive.lock().unwrap();
-                    a.search(&query, vector.as_deref(), limit.clamp(1, 30))?
-                };
+                let hits = messages::search(
+                    &self.db.lock().unwrap(),
+                    &query,
+                    vector.as_deref(),
+                    limit.clamp(1, 30),
+                )?;
                 if hits.is_empty() {
                     return Ok(Outcome::Text(format!("No messages matched '{query}'.")));
                 }
@@ -433,6 +441,16 @@ impl Tools {
                 Ok(Outcome::Text(self.workspace.edit(&path, &edits)?))
             }
 
+            "sql_query" => {
+                let query = str_arg(args, "query")?;
+                let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
+                Ok(Outcome::Text(db::query(
+                    &self.db.lock().unwrap(),
+                    &query,
+                    limit.clamp(1, 500),
+                )?))
+            }
+
             "cron_create" => {
                 let name = str_arg(args, "name")?;
                 let schedule = str_arg(args, "schedule")?;
@@ -452,42 +470,15 @@ impl Tools {
                     enabled: true,
                 };
                 job.validate()?;
-                {
-                    let store = self.cron.lock().unwrap();
-                    store.upsert(&job)?;
-                }
+                cron::upsert(&self.db.lock().unwrap(), &job)?;
                 Ok(Outcome::Text(format!(
                     "Scheduled '{name}' at '{schedule}'. It takes effect on the next restart or immediately if the scheduler picked it up."
                 )))
             }
 
-            "cron_list" => {
-                let jobs = {
-                    let store = self.cron.lock().unwrap();
-                    store.list()?
-                };
-                if jobs.is_empty() {
-                    return Ok(Outcome::Text("No scheduled jobs.".into()));
-                }
-                let body = jobs
-                    .iter()
-                    .map(|j| {
-                        format!(
-                            "{} — '{}' ({}) — {}",
-                            j.name, j.schedule, j.timezone, j.prompt
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                Ok(Outcome::Text(body))
-            }
-
             "cron_delete" => {
                 let name = str_arg(args, "name")?;
-                let gone = {
-                    let store = self.cron.lock().unwrap();
-                    store.delete(&name)?
-                };
+                let gone = cron::delete(&self.db.lock().unwrap(), &name)?;
                 Ok(Outcome::Text(if gone {
                     format!("Deleted job '{name}'.")
                 } else {
@@ -563,7 +554,7 @@ impl Tools {
     }
 }
 
-fn render_memories(hits: &[crate::memory::Record]) -> String {
+fn render_memories(hits: &[memory::Record]) -> String {
     hits.iter()
         .map(|r| {
             format!(
@@ -578,7 +569,7 @@ fn render_memories(hits: &[crate::memory::Record]) -> String {
         .join("\n")
 }
 
-fn render_messages(hits: &[crate::messages::Archived]) -> String {
+fn render_messages(hits: &[messages::Archived]) -> String {
     hits.iter()
         .map(|h| format!("[{}] {}: {}", &h.at[..10.min(h.at.len())], h.sender, h.body))
         .collect::<Vec<_>>()

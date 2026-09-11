@@ -30,23 +30,22 @@
 | `web_fetch` | `url` |
 | `generate_image` | `prompt`, `model` |
 | `cron_create` | `name`, `schedule`, `prompt`, `timezone` |
-| `cron_list`, `cron_delete` | `name` |
+| `cron_delete` | `name` |
+| `sql_query` | `query`, `limit` |
 
-there is no HTTP tool and no clock tool. the sandbox has curl, and the current time is in the system prompt, so neither earns a line in every prompt.
+there is no HTTP tool, no clock tool and no listing tool. the sandbox has curl, and the current time is in the system prompt, so neither earns a line in every prompt.
 
 `send_message` posts to the room mid-turn without ending it, so a long task reports progress instead of going quiet. the final answer is still sent automatically.
 
 ## storage
 
-three SQLite databases under the state directory.
+one SQLite file, `merlin.db`, under the state directory.
 
-`memory.db` holds notes the agent chose to keep: `id`, unique `key`, `content`, `category`, `room_id`, timestamps, with an FTS5 mirror. writing an existing key revises that row. there is no agent or tenant foreign key, so renaming the bot needs no migration.
+`memories` holds notes the agent chose to keep, keyed uniquely so re-filing a subject revises that row rather than adding a near-duplicate. there is no agent or tenant foreign key, so renaming the bot needs no migration. `messages` holds every message, keyed by event id so a sync replay cannot duplicate one. `cron_jobs` holds scheduled jobs.
 
-`messages.db` holds every message, keyed by event id so a sync replay cannot duplicate one. two FTS5 indexes cover it, one with the default tokenizer and one with trigram.
+three FTS5 indexes cover them, one over memories and two over messages, one with the default tokenizer and one with trigram. two sqlite-vec virtual tables hold the embeddings, keyed by rowid, each recording the model and width it was built with. changing either discards the vectors and rebuilds them, since a vec0 table fixes its dimension at creation.
 
-`cron.db` holds scheduled jobs.
-
-`memory.db` and `messages.db` each carry a sqlite-vec virtual table of embeddings keyed by rowid, recording the model and width they were built with. changing either discards the vectors and rebuilds them, since a vec0 table fixes its dimension at creation and vectors from two models cannot be compared.
+these were three separate files until they were not. one file means a query can span them, which is what `sql_query` is for: the agent gets the schema and read-only SQL, so counting, grouping and joining are its problem rather than another tool. writes are refused by SQLite's own parser rather than by inspecting the text, so a comment or a CTE wrapping an update cannot slip past. an older deployment's three files are folded in on first start and renamed aside, never deleted.
 
 ## search
 

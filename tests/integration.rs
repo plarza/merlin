@@ -1,16 +1,16 @@
-//! End to end tests against real databases and real processes.
+//! End to end tests against a real database and real processes.
 //!
 //! Everything here goes through the public API on real files, so a passing run means the SQLite schema, the FTS indexes and the process plumbing actually work,
 //! not that a helper returns what it was told to.
 
-use merlin::cron::{CronStore, Job};
-use merlin::embed::Embeddable;
+use merlin::cron::{self, Job};
+use merlin::embed::{self, Memories, Messages};
 use merlin::exec::Sandbox;
 use merlin::llm::{Attachment, Message};
-use merlin::memory::Memory;
-use merlin::messages::Archive;
 use merlin::room::{Buffers, Turn, is_addressed};
 use merlin::tools::definitions;
+use merlin::{db, memory, messages};
+use rusqlite::Connection;
 
 /// A unique directory per test, so runs do not share state.
 fn scratch(name: &str) -> std::path::PathBuf {
@@ -26,26 +26,37 @@ fn scratch(name: &str) -> std::path::PathBuf {
     dir
 }
 
+fn database(name: &str) -> Connection {
+    db::open(&scratch(name).join("merlin.db")).unwrap()
+}
+
 // ── memory ──────────────────────────────────────────────────────────────────
 
 #[test]
 fn memory_survives_reopening_and_recalls_by_keyword() {
-    let dir = scratch("memory");
-    let path = dir.join("memory.db");
+    let path = scratch("memory").join("merlin.db");
 
     {
-        let m = Memory::open(&path).unwrap();
-        m.store(
+        let db = db::open(&path).unwrap();
+        memory::store(
+            &db,
             "kettle",
             "the kettle in the kitchen is broken",
             "core",
             None,
         )
         .unwrap();
-        m.store("parking", "visitor parking is free after six", "core", None)
-            .unwrap();
+        memory::store(
+            &db,
+            "parking",
+            "visitor parking is free after six",
+            "core",
+            None,
+        )
+        .unwrap();
         // Re-filing the same subject revises it.
-        m.store(
+        memory::store(
+            &db,
             "kettle",
             "the kettle is broken. a new one is on order",
             "core",
@@ -54,113 +65,217 @@ fn memory_survives_reopening_and_recalls_by_keyword() {
         .unwrap();
     }
 
-    let m = Memory::open(&path).unwrap();
-    assert_eq!(m.count().unwrap(), 2, "upsert must not duplicate a key");
-
-    let hits = m.recall("kettle broken", None, 5).unwrap();
-    assert_eq!(hits.len(), 1);
-    assert!(
-        hits[0].content.contains("new one is on order"),
-        "kept the revision"
+    let db = db::open(&path).unwrap();
+    assert_eq!(
+        memory::count(&db).unwrap(),
+        2,
+        "upsert must not duplicate a key"
     );
 
-    // A query that FTS5 would reject as syntax must still be answerable.
-    assert!(m.recall("!!!", None, 5).is_ok());
+    let hits = memory::recall(&db, "kettle broken", None, 5).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(
+        hits[0].content.contains("on order"),
+        "the revision must win"
+    );
 
-    assert!(m.forget("kettle").unwrap());
-    assert!(!m.forget("kettle").unwrap());
-    assert_eq!(m.count().unwrap(), 1);
+    // Punctuation alone is not an FTS expression; it must miss rather than error.
+    assert!(memory::recall(&db, "!!!", None, 5).is_ok());
 }
 
 // ── message search ──────────────────────────────────────────────────────────
 
-fn seeded_archive(dir: &std::path::Path) -> Archive {
-    let a = Archive::open(&dir.join("messages.db")).unwrap();
+fn seeded_archive(name: &str) -> Connection {
+    let db = database(name);
     for (i, (sender, body)) in [
-        ("@alice:example.org", "the shoelace came apart again"),
-        ("@bob:example.org", "the gymnast landed it cleanly"),
-        ("@alice:example.org", "who won the 2025 world cup"),
-        ("@bob:example.org", "the 2018 world cup final was dull"),
+        ("@sam:x", "the shoelace snapped on my boot"),
+        ("@lee:x", "world cup final was in 2025"),
+        ("@kim:x", "the 2018 final went to penalties"),
+        ("@sam:x", "a gymnast stuck the landing"),
     ]
     .iter()
     .enumerate()
     {
-        a.record(
+        messages::record(
+            &db,
             &format!("$e{i}"),
-            "!r:example.org",
+            "!r:x",
             sender,
             body,
-            "2026-09-10T00:00:00Z",
+            &format!("2026-01-0{}T00:00:00Z", i + 1),
         )
         .unwrap();
     }
-    a
+    db
 }
 
 #[test]
 fn bare_words_tolerate_misspelling() {
-    let dir = scratch("fuzzy");
-    let hits = seeded_archive(&dir).search("shoelase", None, 5).unwrap();
+    let db = seeded_archive("fuzzy");
+    let hits = messages::search(&db, "shoelase", None, 5).unwrap();
     assert_eq!(hits.len(), 1);
     assert!(hits[0].body.contains("shoelace"));
 }
 
 #[test]
 fn quoted_terms_are_required_and_combine_with_fuzzy_ones() {
-    let dir = scratch("quoted");
-    let a = seeded_archive(&dir);
+    let db = seeded_archive("quoted");
 
-    // Both messages concern the world cup, and the quoted year selects one.
-    let hits = a.search("wrold cup \"2025\"", None, 5).unwrap();
+    let hits = messages::search(&db, "wrold cup \"2025\"", None, 5).unwrap();
     assert_eq!(hits.len(), 1);
     assert!(hits[0].body.contains("2025"));
 
-    // A misspelled loose term alongside a required one.
-    let hits = a.search("finl \"2018\"", None, 5).unwrap();
+    let hits = messages::search(&db, "finl \"2018\"", None, 5).unwrap();
     assert_eq!(hits.len(), 1);
     assert!(hits[0].body.contains("2018"));
 
-    // Quoting alone is an exact search, so a near miss finds nothing.
-    assert_eq!(a.search("\"gymnast\"", None, 5).unwrap().len(), 1);
-    assert!(a.search("\"gymnasts\"", None, 5).unwrap().is_empty());
+    // A quoted term is exact, so a near miss must not match.
+    assert_eq!(
+        messages::search(&db, "\"gymnast\"", None, 5).unwrap().len(),
+        1
+    );
+    assert!(
+        messages::search(&db, "\"gymnasts\"", None, 5)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
 fn search_rejects_nothing_and_finds_nothing_for_unrelated_queries() {
-    let dir = scratch("edges");
-    let a = seeded_archive(&dir);
-    assert!(a.search("s&p", None, 5).is_ok());
-    assert!(a.search("???", None, 5).is_ok());
-    assert!(a.search("", None, 5).unwrap().is_empty());
-    assert!(a.search("elephant", None, 5).unwrap().is_empty());
+    let db = seeded_archive("empty");
+    assert!(messages::search(&db, "s&p", None, 5).is_ok());
+    assert!(messages::search(&db, "???", None, 5).is_ok());
+    assert!(messages::search(&db, "", None, 5).unwrap().is_empty());
+    assert!(
+        messages::search(&db, "elephant", None, 5)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
 fn recent_returns_the_newest_messages_oldest_first() {
-    let dir = scratch("recent");
-    let a = seeded_archive(&dir);
-    let rows = a.recent("!r:example.org", 2).unwrap();
+    let db = seeded_archive("recent");
+    let rows = messages::recent(&db, "!r:x", 2).unwrap();
     assert_eq!(rows.len(), 2);
-    // Ordering matters: the buffer is rebuilt from this and reads as conversation.
-    assert!(rows[0].at <= rows[1].at);
-    // A room with nothing in it restores nothing rather than failing.
-    assert!(a.recent("!empty:example.org", 5).unwrap().is_empty());
+    assert!(rows[0].body.contains("2018"));
+    assert!(rows[1].body.contains("gymnast"));
+    assert!(messages::recent(&db, "!other:x", 5).unwrap().is_empty());
 }
 
 #[test]
 fn an_event_is_archived_once_however_often_sync_replays_it() {
-    let dir = scratch("dupes");
-    let a = seeded_archive(&dir);
-    let before = a.count().unwrap();
-    a.record(
-        "$e0",
-        "!r:example.org",
-        "@alice:example.org",
-        "different text",
-        "now",
+    let db = database("replay");
+    for _ in 0..3 {
+        messages::record(
+            &db,
+            "$same",
+            "!r:x",
+            "@sam:x",
+            "hello",
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+    }
+    assert_eq!(messages::count(&db).unwrap(), 1);
+}
+
+// ── one database ────────────────────────────────────────────────────────────
+
+#[test]
+fn the_three_old_databases_are_folded_into_one() {
+    let dir = scratch("migrate");
+
+    // Three separate files, as an older deployment left them.
+    {
+        let old = db::open(&dir.join("memory.db")).unwrap();
+        memory::store(&old, "kept", "this must survive", "core", None).unwrap();
+    }
+    {
+        let old = db::open(&dir.join("messages.db")).unwrap();
+        messages::record(
+            &old,
+            "$m1",
+            "!r:x",
+            "@sam:x",
+            "so must this",
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+    }
+    {
+        let old = db::open(&dir.join("cron.db")).unwrap();
+        cron::upsert(&old, &job("nightly", "0 7 * * *")).unwrap();
+    }
+
+    let mut db = db::open(&dir.join("merlin.db")).unwrap();
+    let moved = db::migrate_from_split_files(&mut db, &dir).unwrap();
+    assert_eq!(moved, 3, "one row from each file");
+
+    assert_eq!(memory::count(&db).unwrap(), 1);
+    assert_eq!(messages::count(&db).unwrap(), 1);
+    assert_eq!(cron::list(&db).unwrap().len(), 1);
+
+    // The originals are moved aside rather than deleted, and a second run is a no-op.
+    assert!(dir.join("memory.db.migrated").exists());
+    assert!(!dir.join("memory.db").exists());
+    assert_eq!(db::migrate_from_split_files(&mut db, &dir).unwrap(), 0);
+
+    // The FTS triggers fired on the copy, so the migrated rows are searchable.
+    assert_eq!(memory::recall(&db, "survive", None, 5).unwrap().len(), 1);
+    assert_eq!(messages::search(&db, "\"must\"", None, 5).unwrap().len(), 1);
+}
+
+#[test]
+fn sql_queries_can_read_everything_and_write_nothing() {
+    let db = database("sql");
+    memory::store(&db, "a", "first note", "core", None).unwrap();
+    memory::store(&db, "b", "second note", "daily", None).unwrap();
+    messages::record(&db, "$1", "!r:x", "@sam:x", "hello", "2026-01-01T00:00:00Z").unwrap();
+
+    // A question neither search tool shapes well: grouping across a table.
+    let out = db::query(
+        &db,
+        "SELECT category, count(*) FROM memories GROUP BY category",
+        50,
     )
     .unwrap();
-    assert_eq!(a.count().unwrap(), before);
+    assert!(out.contains("core | 1"), "got: {out}");
+    assert!(out.contains("daily | 1"), "got: {out}");
+
+    // The tables now live together, so one query can span them.
+    let out = db::query(
+        &db,
+        "SELECT (SELECT count(*) FROM memories) AS m, (SELECT count(*) FROM messages) AS n",
+        50,
+    )
+    .unwrap();
+    assert!(out.contains("2 | 1"), "got: {out}");
+
+    for write in [
+        "DELETE FROM memories",
+        "UPDATE memories SET content = 'x'",
+        "INSERT INTO memories (id, key, content, category, created_at, updated_at) VALUES ('i','k','c','core','t','t')",
+        "DROP TABLE memories",
+    ] {
+        assert!(
+            db::query(&db, write, 50).is_err(),
+            "{write} must be refused"
+        );
+    }
+    assert_eq!(
+        memory::count(&db).unwrap(),
+        2,
+        "nothing may have been written"
+    );
+
+    assert!(
+        db::query(&db, "SELECT * FROM memories WHERE 0", 50)
+            .unwrap()
+            .contains("No rows")
+    );
+    assert!(db::query(&db, "SELECT nonsense syntax(", 50).is_err());
 }
 
 // ── semantic search ─────────────────────────────────────────────────────────
@@ -173,61 +288,68 @@ fn vector(x: f32, y: f32, z: f32) -> Vec<f32> {
 
 const MODEL: &str = "test/embedding-model";
 
+fn embed_all<E: embed::Embeddable>(db: &mut Connection, pick: impl Fn(&str) -> Vec<f32>) {
+    let pending = embed::pending::<E>(db, 100).unwrap();
+    let rows: Vec<(i64, Vec<f32>)> = pending.iter().map(|(id, text)| (*id, pick(text))).collect();
+    embed::save::<E>(db, &rows).unwrap();
+}
+
 #[test]
 fn semantic_recall_ranks_memories_by_direction_not_magnitude() {
-    let dir = scratch("semantic-memory");
-    let mut m = Memory::open(&dir.join("memory.db")).unwrap();
-    m.enable_semantic(MODEL, 3).unwrap();
+    let mut db = database("semantic-memory");
+    embed::ensure_table::<Memories>(&db, MODEL, 3).unwrap();
 
-    m.store("boiler", "the heating packed up", "core", None)
-        .unwrap();
-    m.store("parking", "visitor parking is free after six", "core", None)
-        .unwrap();
+    memory::store(&db, "boiler", "the heating packed up", "core", None).unwrap();
+    memory::store(
+        &db,
+        "parking",
+        "visitor parking is free after six",
+        "core",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        embed::pending::<Memories>(&db, 10).unwrap().len(),
+        2,
+        "nothing is embedded until the loop runs"
+    );
 
-    let pending = m.pending_embeddings(10).unwrap();
-    assert_eq!(pending.len(), 2, "nothing is embedded until the loop runs");
-
-    let vectors: Vec<(i64, Vec<f32>)> = pending
-        .iter()
-        .map(|(id, text)| {
-            // Deliberately not unit length: Matryoshka truncation returns short vectors, so cosine has to rank on direction alone.
-            let v = if text.contains("heating") {
-                vector(0.31, 0.0, 0.0)
-            } else {
-                vector(0.0, 1.0, 0.0)
-            };
-            (*id, v)
-        })
-        .collect();
-    assert_eq!(m.save_embeddings(&vectors).unwrap(), 2);
-    assert!(m.pending_embeddings(10).unwrap().is_empty());
+    // Deliberately not unit length: Matryoshka truncation returns short vectors, so cosine has to rank on direction alone.
+    embed_all::<Memories>(&mut db, |text| {
+        if text.contains("heating") {
+            vector(0.31, 0.0, 0.0)
+        } else {
+            vector(0.0, 1.0, 0.0)
+        }
+    });
+    assert!(embed::pending::<Memories>(&db, 10).unwrap().is_empty());
 
     // A query along the heating axis at a wildly different scale.
-    let hits = m
-        .recall("heating trouble", Some(&vector(9.7, 0.0, 0.0)), 2)
-        .unwrap();
+    let hits = memory::recall(&db, "heating trouble", Some(&vector(9.7, 0.0, 0.0)), 2).unwrap();
     assert_eq!(hits[0].key, "boiler");
     assert_eq!(hits[1].key, "parking");
 }
 
 #[test]
 fn revising_a_memory_re_embeds_it() {
-    let dir = scratch("semantic-revise");
-    let mut m = Memory::open(&dir.join("memory.db")).unwrap();
-    m.enable_semantic(MODEL, 3).unwrap();
+    let mut db = database("semantic-revise");
+    embed::ensure_table::<Memories>(&db, MODEL, 3).unwrap();
 
-    m.store("kettle", "the kettle is broken", "core", None)
-        .unwrap();
-    let pending = m.pending_embeddings(10).unwrap();
-    m.save_embeddings(&[(pending[0].0, vector(1.0, 0.0, 0.0))])
-        .unwrap();
-    assert!(m.pending_embeddings(10).unwrap().is_empty());
+    memory::store(&db, "kettle", "the kettle is broken", "core", None).unwrap();
+    embed_all::<Memories>(&mut db, |_| vector(1.0, 0.0, 0.0));
+    assert!(embed::pending::<Memories>(&db, 10).unwrap().is_empty());
 
     // The row keeps its rowid, so a stale vector would go on describing the old text.
-    m.store("kettle", "the kettle was replaced on tuesday", "core", None)
-        .unwrap();
+    memory::store(
+        &db,
+        "kettle",
+        "the kettle was replaced on tuesday",
+        "core",
+        None,
+    )
+    .unwrap();
     assert_eq!(
-        m.pending_embeddings(10).unwrap().len(),
+        embed::pending::<Memories>(&db, 10).unwrap().len(),
         1,
         "revised content must be queued for re-embedding"
     );
@@ -235,31 +357,23 @@ fn revising_a_memory_re_embeds_it() {
 
 #[test]
 fn forgetting_a_memory_takes_its_vector_with_it() {
-    let dir = scratch("semantic-forget");
-    let mut m = Memory::open(&dir.join("memory.db")).unwrap();
-    m.enable_semantic(MODEL, 3).unwrap();
+    let mut db = database("semantic-forget");
+    embed::ensure_table::<Memories>(&db, MODEL, 3).unwrap();
 
-    m.store("doomed", "this will be deleted", "core", None)
-        .unwrap();
-    let pending = m.pending_embeddings(10).unwrap();
-    m.save_embeddings(&[(pending[0].0, vector(1.0, 0.0, 0.0))])
-        .unwrap();
+    memory::store(&db, "doomed", "this will be deleted", "core", None).unwrap();
+    embed_all::<Memories>(&mut db, |_| vector(1.0, 0.0, 0.0));
+    memory::forget(&db, "doomed").unwrap();
 
-    m.forget("doomed").unwrap();
-
-    let hits = m
-        .recall("deleted thing", Some(&vector(1.0, 0.0, 0.0)), 5)
-        .unwrap();
+    let hits = memory::recall(&db, "deleted thing", Some(&vector(1.0, 0.0, 0.0)), 5).unwrap();
     assert!(
         hits.iter().all(|h| h.key != "doomed"),
         "a deleted memory must not still be reachable by meaning, found {hits:?}"
     );
 
     // SQLite hands the freed rowid to the next insert, so a surviving vector would answer for an unrelated memory.
-    m.store("fresh", "something else entirely", "core", None)
-        .unwrap();
+    memory::store(&db, "fresh", "something else entirely", "core", None).unwrap();
     assert_eq!(
-        m.pending_embeddings(10).unwrap().len(),
+        embed::pending::<Memories>(&db, 10).unwrap().len(),
         1,
         "the reused rowid must not inherit a vector"
     );
@@ -267,24 +381,16 @@ fn forgetting_a_memory_takes_its_vector_with_it() {
 
 #[test]
 fn changing_the_embedding_model_discards_incompatible_vectors() {
-    let dir = scratch("semantic-model-swap");
-    let path = dir.join("memory.db");
-
-    {
-        let mut m = Memory::open(&path).unwrap();
-        m.enable_semantic(MODEL, 3).unwrap();
-        m.store("a", "some note", "core", None).unwrap();
-        let pending = m.pending_embeddings(10).unwrap();
-        m.save_embeddings(&[(pending[0].0, vector(1.0, 0.0, 0.0))])
-            .unwrap();
-        assert!(m.pending_embeddings(10).unwrap().is_empty());
-    }
+    let mut db = database("semantic-model-swap");
+    embed::ensure_table::<Memories>(&db, MODEL, 3).unwrap();
+    memory::store(&db, "a", "some note", "core", None).unwrap();
+    embed_all::<Memories>(&mut db, |_| vector(1.0, 0.0, 0.0));
+    assert!(embed::pending::<Memories>(&db, 10).unwrap().is_empty());
 
     // A different width cannot be compared against the stored vectors at all.
-    let m = Memory::open(&path).unwrap();
-    m.enable_semantic("test/other-model", 4).unwrap();
+    embed::ensure_table::<Memories>(&db, "test/other-model", 4).unwrap();
     assert_eq!(
-        m.pending_embeddings(10).unwrap().len(),
+        embed::pending::<Memories>(&db, 10).unwrap().len(),
         1,
         "vectors from another model must be rebuilt, not reused"
     );
@@ -292,19 +398,21 @@ fn changing_the_embedding_model_discards_incompatible_vectors() {
 
 #[test]
 fn quoted_terms_filter_and_the_rest_ranks_by_meaning() {
-    let dir = scratch("semantic-combined");
-    let mut a = Archive::open(&dir.join("messages.db")).unwrap();
-    a.enable_semantic(MODEL, 3).unwrap();
+    let mut db = database("semantic-combined");
+    embed::ensure_table::<Messages>(&db, MODEL, 3).unwrap();
 
     // Two mention 2025, one does not. Two are about the world cup, one is not.
-    let rows = [
-        ("$a", "@sam:x", "the world cup final was in 2025"),
-        ("$b", "@lee:x", "quarterly revenue for 2025 was strong"),
-        ("$c", "@kim:x", "the world cup was thrilling"),
-    ];
-    for (i, (id, sender, body)) in rows.iter().enumerate() {
-        a.record(
-            id,
+    for (i, (sender, body)) in [
+        ("@sam:x", "the world cup final was in 2025"),
+        ("@lee:x", "quarterly revenue for 2025 was strong"),
+        ("@kim:x", "the world cup was thrilling"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        messages::record(
+            &db,
+            &format!("${i}"),
             "!r:x",
             sender,
             body,
@@ -312,36 +420,31 @@ fn quoted_terms_filter_and_the_rest_ranks_by_meaning() {
         )
         .unwrap();
     }
-
-    let pending = a.pending_embeddings(10).unwrap();
-    let vectors: Vec<(i64, Vec<f32>)> = pending
-        .iter()
-        .map(|(id, text)| {
-            let v = if text.contains("world cup") {
-                vector(1.0, 0.0, 0.0)
-            } else {
-                vector(0.0, 1.0, 0.0)
-            };
-            (*id, v)
-        })
-        .collect();
-    a.save_embeddings(&vectors).unwrap();
+    embed_all::<Messages>(&mut db, |text| {
+        if text.contains("world cup") {
+            vector(1.0, 0.0, 0.0)
+        } else {
+            vector(0.0, 1.0, 0.0)
+        }
+    });
 
     // `world cup "2025"`: 2025 is a requirement, the rest is meaning.
-    let hits = a
-        .search("world cup \"2025\"", Some(&vector(1.0, 0.0, 0.0)), 5)
-        .unwrap();
+    let bodies: Vec<String> =
+        messages::search(&db, "world cup \"2025\"", Some(&vector(1.0, 0.0, 0.0)), 5)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.body)
+            .collect();
 
-    let bodies: Vec<&str> = hits.iter().map(|h| h.body.as_str()).collect();
     assert!(
-        !bodies.contains(&"the world cup was thrilling"),
+        !bodies.iter().any(|b| b == "the world cup was thrilling"),
         "a message without the required term must be excluded however well it matches in meaning, got {bodies:?}"
     );
     assert_eq!(
         bodies,
         vec![
-            "the world cup final was in 2025",
-            "quarterly revenue for 2025 was strong"
+            "the world cup final was in 2025".to_string(),
+            "quarterly revenue for 2025 was strong".to_string()
         ],
         "both keep 2025; the world cup one ranks first on meaning"
     );
@@ -349,10 +452,10 @@ fn quoted_terms_filter_and_the_rest_ranks_by_meaning() {
 
 #[test]
 fn an_all_quoted_query_stays_exact() {
-    let dir = scratch("semantic-quoted-only");
-    let mut a = Archive::open(&dir.join("messages.db")).unwrap();
-    a.enable_semantic(MODEL, 3).unwrap();
-    a.record(
+    let mut db = database("semantic-quoted-only");
+    embed::ensure_table::<Messages>(&db, MODEL, 3).unwrap();
+    messages::record(
+        &db,
         "$a",
         "!r:x",
         "@sam:x",
@@ -360,7 +463,8 @@ fn an_all_quoted_query_stays_exact() {
         "2026-01-01T00:00:00Z",
     )
     .unwrap();
-    a.record(
+    messages::record(
+        &db,
         "$b",
         "!r:x",
         "@lee:x",
@@ -368,25 +472,20 @@ fn an_all_quoted_query_stays_exact() {
         "2026-01-02T00:00:00Z",
     )
     .unwrap();
-    let pending = a.pending_embeddings(10).unwrap();
-    let vectors: Vec<(i64, Vec<f32>)> = pending
-        .iter()
-        .map(|(id, _)| (*id, vector(1.0, 0.0, 0.0)))
-        .collect();
-    a.save_embeddings(&vectors).unwrap();
+    // Identical vectors, so only the exact filter can separate them.
+    embed_all::<Messages>(&mut db, |_| vector(1.0, 0.0, 0.0));
 
-    // Nothing unquoted means nothing to embed, so identical vectors cannot muddle the result.
-    let hits = a.search("\"invoice\"", None, 5).unwrap();
+    let hits = messages::search(&db, "\"invoice\"", None, 5).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].sender, "@sam:x");
 }
 
 #[test]
 fn search_falls_back_to_matching_text_when_nothing_is_embedded_yet() {
-    let dir = scratch("semantic-backfilling");
-    let a = Archive::open(&dir.join("messages.db")).unwrap();
-    a.enable_semantic(MODEL, 3).unwrap();
-    a.record(
+    let db = database("semantic-backfilling");
+    embed::ensure_table::<Messages>(&db, MODEL, 3).unwrap();
+    messages::record(
+        &db,
         "$a",
         "!r:x",
         "@sam:x",
@@ -397,9 +496,7 @@ fn search_falls_back_to_matching_text_when_nothing_is_embedded_yet() {
 
     // Mid-backfill every row is pending, so ranking by meaning has nothing to work with.
     // Returning nothing until it finishes would be worse than approximate matches.
-    let hits = a
-        .search("shoelase", Some(&vector(1.0, 0.0, 0.0)), 5)
-        .unwrap();
+    let hits = messages::search(&db, "shoelase", Some(&vector(1.0, 0.0, 0.0)), 5).unwrap();
     assert_eq!(hits.len(), 1, "the fallback must still answer");
     assert_eq!(hits[0].body, "the shoelace snapped");
 }
@@ -503,23 +600,22 @@ fn job(name: &str, schedule: &str) -> Job {
 
 #[test]
 fn jobs_persist_edit_in_place_and_delete() {
-    let dir = scratch("cron");
-    let path = dir.join("cron.db");
+    let path = scratch("cron").join("merlin.db");
 
     {
-        let s = CronStore::open(&path).unwrap();
-        s.upsert(&job("hn", "0 7 * * *")).unwrap();
-        s.upsert(&job("hn", "0 8 * * *")).unwrap();
-        s.record_run("hn", "ok").unwrap();
+        let db = db::open(&path).unwrap();
+        cron::upsert(&db, &job("hn", "0 7 * * *")).unwrap();
+        cron::upsert(&db, &job("hn", "0 8 * * *")).unwrap();
+        cron::record_run(&db, "hn", "ok").unwrap();
     }
 
-    let s = CronStore::open(&path).unwrap();
-    let jobs = s.list().unwrap();
+    let db = db::open(&path).unwrap();
+    let jobs = cron::list(&db).unwrap();
     assert_eq!(jobs.len(), 1, "same name edits rather than duplicates");
     assert_eq!(jobs[0].schedule, "0 8 * * *");
 
-    assert!(s.delete("hn").unwrap());
-    assert!(!s.delete("hn").unwrap());
+    assert!(cron::delete(&db, "hn").unwrap());
+    assert!(!cron::delete(&db, "hn").unwrap());
 }
 
 #[test]
@@ -649,7 +745,7 @@ fn every_tool_the_agent_is_offered_is_described() {
         "edit_file",
         "run_code",
         "cron_create",
-        "cron_list",
+        "sql_query",
         "cron_delete",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");

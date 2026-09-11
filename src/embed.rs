@@ -10,17 +10,45 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Mutex, Once};
 use std::time::Duration;
-
-use crate::memory::Memory;
-use crate::messages::Archive;
 
 const EMBED_URL: &str = "https://openrouter.ai/api/v1/embeddings";
 
 /// Inputs longer than this are cut before embedding.
 /// Long inputs cost more and dilute the vector, and the tail of a long message rarely changes what it is about.
 const MAX_INPUT_CHARS: usize = 4000;
+
+/// A table whose rows carry embeddings.
+///
+/// Everything below is written once against these four names rather than once per store, which is why memories and messages share an implementation instead of a shape.
+pub trait Embeddable {
+    /// Table holding the rows.
+    const SOURCE: &'static str;
+    /// Column to embed.
+    const TEXT: &'static str;
+    /// The vec0 table holding their vectors.
+    const TABLE: &'static str;
+    /// Its primary key column.
+    const KEY: &'static str;
+}
+
+pub struct Memories;
+impl Embeddable for Memories {
+    const SOURCE: &'static str = "memories";
+    // Only the content. Keys are frequently opaque identifiers rather than descriptions, and feeding one into an embedding is noise.
+    const TEXT: &'static str = "content";
+    const TABLE: &'static str = "memory_vectors";
+    const KEY: &'static str = "memory_rowid";
+}
+
+pub struct Messages;
+impl Embeddable for Messages {
+    const SOURCE: &'static str = "messages";
+    const TEXT: &'static str = "body";
+    const TABLE: &'static str = "message_vectors";
+    const KEY: &'static str = "message_rowid";
+}
 
 pub struct Embedder {
     http: reqwest::Client,
@@ -31,16 +59,19 @@ pub struct Embedder {
 
 impl Embedder {
     pub fn new(api_key: String, model: String, dimensions: usize, timeout_s: u64) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .read_timeout(Duration::from_secs(timeout_s))
-            .connect_timeout(Duration::from_secs(20))
-            .build()?;
         Ok(Self {
-            http,
+            http: reqwest::Client::builder()
+                .read_timeout(Duration::from_secs(timeout_s))
+                .connect_timeout(Duration::from_secs(20))
+                .build()?,
             api_key,
             model,
             dimensions,
         })
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     pub fn dimensions(&self) -> usize {
@@ -53,18 +84,16 @@ impl Embedder {
             return Ok(Vec::new());
         }
 
-        let input: Vec<String> = texts.iter().map(|t| truncate(t, MAX_INPUT_CHARS)).collect();
-        let body = json!({
-            "model": self.model,
-            "input": input,
-            "dimensions": self.dimensions,
-        });
+        let input: Vec<String> = texts
+            .iter()
+            .map(|t| t.chars().take(MAX_INPUT_CHARS).collect())
+            .collect();
 
         let resp = self
             .http
             .post(EMBED_URL)
             .bearer_auth(&self.api_key)
-            .json(&body)
+            .json(&json!({ "model": self.model, "input": input, "dimensions": self.dimensions }))
             .send()
             .await
             .context("calling OpenRouter embeddings")?;
@@ -85,41 +114,40 @@ impl Embedder {
             .context("embeddings response had no data array")?;
 
         // The wire format carries an index per item and does not promise request order.
-        let mut indexed: Vec<(usize, Vec<f32>)> = Vec::with_capacity(data.len());
-        for item in data {
-            let index = item.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-            let vector = item
-                .get("embedding")
-                .and_then(Value::as_array)
-                .context("embedding item had no embedding array")?
-                .iter()
-                .map(|v| v.as_f64().unwrap_or(0.0) as f32)
-                .collect::<Vec<f32>>();
-
-            if vector.len() != self.dimensions {
-                anyhow::bail!(
+        let mut indexed: Vec<(usize, Vec<f32>)> = data
+            .iter()
+            .map(|item| {
+                let index = item.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let vector: Vec<f32> = item
+                    .get("embedding")
+                    .and_then(Value::as_array)
+                    .context("embedding item had no embedding array")?
+                    .iter()
+                    .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                    .collect();
+                anyhow::ensure!(
+                    vector.len() == self.dimensions,
                     "model returned {} dimensions, expected {}",
                     vector.len(),
                     self.dimensions
                 );
-            }
-            indexed.push((index, vector));
-        }
+                Ok((index, vector))
+            })
+            .collect::<Result<_>>()?;
 
-        if indexed.len() != texts.len() {
-            anyhow::bail!(
-                "asked for {} embeddings, got {}",
-                texts.len(),
-                indexed.len()
-            );
-        }
+        anyhow::ensure!(
+            indexed.len() == texts.len(),
+            "asked for {} embeddings, got {}",
+            texts.len(),
+            indexed.len()
+        );
 
         indexed.sort_by_key(|(i, _)| *i);
         Ok(indexed.into_iter().map(|(_, v)| v).collect())
     }
 }
 
-/// sqlite-vec is a compiled-in extension rather than a loadable one, and it has to be registered before any connection is opened.
+/// sqlite-vec is compiled in rather than loaded, and has to be registered before any connection is opened.
 pub fn register() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| unsafe {
@@ -136,14 +164,12 @@ pub fn register() {
     });
 }
 
-/// Create the vector table, and drop it first if it was built for a different model or width.
+/// Create the vector table, dropping it first if it was built for a different model or width.
 ///
 /// A vec0 table fixes its dimension at creation, so changing either setting leaves rows that can never be compared against a new query.
-/// Rebuilding is cheap: the loop re-embeds whatever is missing.
-pub fn ensure_table(
+/// Rebuilding is cheap: the backlog loop re-embeds whatever is missing.
+pub fn ensure_table<E: Embeddable>(
     conn: &Connection,
-    table: &str,
-    key: &str,
     model: &str,
     dimensions: usize,
 ) -> Result<()> {
@@ -155,51 +181,75 @@ pub fn ensure_table(
     let current: Option<(String, i64)> = conn
         .query_row(
             "SELECT model, dimensions FROM embedding_meta WHERE table_name = ?1",
-            params![table],
+            params![E::TABLE],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .ok();
+        .optional()?;
 
     if let Some((have_model, have_dims)) = &current
         && (have_model != model || *have_dims != dimensions as i64)
     {
         tracing::warn!(
-            %table, from = %have_model, from_dims = have_dims, to = %model, to_dims = dimensions,
+            table = E::TABLE, from = %have_model, to = %model,
             "embedding model changed; discarding stored vectors"
         );
-        conn.execute_batch(&format!("DROP TABLE IF EXISTS {table};"))?;
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS {};", E::TABLE))?;
     }
 
     conn.execute_batch(&format!(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS {table} USING vec0(
-           {key} INTEGER PRIMARY KEY,
-           embedding float[{dimensions}] distance_metric=cosine
-         );"
+        "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING vec0(
+           {} INTEGER PRIMARY KEY,
+           embedding float[{dimensions}] distance_metric=cosine);",
+        E::TABLE,
+        E::KEY
     ))?;
     conn.execute(
         "INSERT INTO embedding_meta (table_name, model, dimensions) VALUES (?1, ?2, ?3)
          ON CONFLICT(table_name) DO UPDATE SET model = excluded.model, dimensions = excluded.dimensions",
-        params![table, model, dimensions as i64],
+        params![E::TABLE, model, dimensions as i64],
     )?;
     Ok(())
 }
 
-pub fn count_pending(conn: &Connection, source: &str, table: &str, key: &str) -> Result<i64> {
-    let sql =
-        format!("SELECT count(*) FROM {source} WHERE rowid NOT IN (SELECT {key} FROM {table})");
-    Ok(conn.query_row(&sql, [], |r| r.get(0))?)
+/// Rows with no vector yet, newest first, as (rowid, text to embed).
+///
+/// A LEFT JOIN against a vec0 table silently returns nothing, since the virtual table cannot be scanned as the right side of a join.
+/// NOT IN materialises the subquery instead, which is correct and fast enough at this size.
+pub fn pending<E: Embeddable>(conn: &Connection, limit: usize) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT rowid, {} FROM {} WHERE rowid NOT IN (SELECT {} FROM {})
+         ORDER BY rowid DESC LIMIT ?1",
+        E::TEXT,
+        E::SOURCE,
+        E::KEY,
+        E::TABLE
+    ))?;
+    Ok(stmt
+        .query_map(params![limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?)
 }
 
-pub fn save(
-    conn: &mut Connection,
-    table: &str,
-    key: &str,
-    rows: &[(i64, Vec<f32>)],
-) -> Result<usize> {
+pub fn count_pending<E: Embeddable>(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        &format!(
+            "SELECT count(*) FROM {} WHERE rowid NOT IN (SELECT {} FROM {})",
+            E::SOURCE,
+            E::KEY,
+            E::TABLE
+        ),
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+pub fn save<E: Embeddable>(conn: &mut Connection, rows: &[(i64, Vec<f32>)]) -> Result<usize> {
     let tx = conn.transaction()?;
     {
-        let sql = format!("INSERT OR REPLACE INTO {table}({key}, embedding) VALUES (?1, ?2)");
-        let mut stmt = tx.prepare(&sql)?;
+        let mut stmt = tx.prepare(&format!(
+            "INSERT OR REPLACE INTO {}({}, embedding) VALUES (?1, ?2)",
+            E::TABLE,
+            E::KEY
+        ))?;
         for (rowid, vector) in rows {
             stmt.execute(params![rowid, to_blob(vector)])?;
         }
@@ -209,42 +259,28 @@ pub fn save(
 }
 
 /// Drop one row's vector, so a rewritten row is re-embedded rather than found under its old meaning.
-pub fn invalidate(conn: &Connection, table: &str, key: &str, rowid: i64) -> Result<()> {
-    let sql = format!("DELETE FROM {table} WHERE {key} = ?1");
-    conn.execute(&sql, params![rowid])?;
+pub fn invalidate<E: Embeddable>(conn: &Connection, rowid: i64) -> Result<()> {
+    conn.execute(
+        &format!("DELETE FROM {} WHERE {} = ?1", E::TABLE, E::KEY),
+        params![rowid],
+    )?;
     Ok(())
 }
 
 /// The `k` nearest rowids, closest first.
-pub fn nearest(
-    conn: &Connection,
-    table: &str,
-    key: &str,
-    query: &[f32],
-    k: usize,
-) -> Result<Vec<i64>> {
-    let sql = format!(
-        "SELECT {key} FROM {table}
-         WHERE embedding MATCH ?1 AND k = ?2
-         ORDER BY distance"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
+pub fn nearest<E: Embeddable>(conn: &Connection, query: &[f32], k: usize) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM {} WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance",
+        E::KEY,
+        E::TABLE
+    ))?;
+    Ok(stmt
         .query_map(params![to_blob(query), k as i64], |r| r.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
-}
-
-/// A store whose rows can be embedded.
-/// Memories and messages differ in every other respect but drain identically, so the backlog loop is written once against this.
-pub trait Embeddable {
-    /// Rows with no vector yet, newest first, as (rowid, text to embed).
-    fn pending_embeddings(&self, limit: usize) -> Result<Vec<(i64, String)>>;
-    fn save_embeddings(&mut self, rows: &[(i64, Vec<f32>)]) -> Result<usize>;
+        .collect::<Result<Vec<_>, _>>()?)
 }
 
 /// Load rows by rowid, preserving the order given and skipping any that have gone.
-/// Vector search returns an order that a SQL `IN` clause would discard, which is why these are fetched one at a time.
+/// Vector search returns an order a SQL `IN` clause would discard, which is why these are fetched one at a time.
 pub fn load_ordered<T>(
     conn: &Connection,
     sql: &str,
@@ -263,27 +299,30 @@ pub fn load_ordered<T>(
 
 /// Rank a candidate set by cosine against the query vector.
 /// Candidates with no vector yet fall in behind everything scored rather than disappearing, which keeps results sane mid-backfill.
-pub fn rank<T>(
+pub fn rank<E: Embeddable, T>(
     conn: &Connection,
-    table: &str,
-    key: &str,
     candidates: Vec<(i64, T)>,
     vector: &[f32],
     limit: usize,
 ) -> Result<Vec<T>> {
-    let ids: Vec<i64> = candidates.iter().map(|(id, _)| *id).collect();
-    let vectors = vectors_for(conn, table, key, &ids)?;
-    if vectors.is_empty() {
-        return Ok(Vec::new());
-    }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT embedding FROM {} WHERE {} = ?1",
+        E::TABLE,
+        E::KEY
+    ))?;
 
     let mut scored: Vec<(f32, T)> = Vec::new();
     let mut unscored: Vec<T> = Vec::new();
     for (id, row) in candidates {
-        match vectors.get(&id) {
-            Some(v) => scored.push((cosine(vector, v), row)),
+        let blob: Option<Vec<u8>> = stmt.query_row(params![id], |r| r.get(0)).optional()?;
+        match blob {
+            Some(b) => scored.push((cosine(vector, &from_blob(&b)), row)),
             None => unscored.push(row),
         }
+    }
+
+    if scored.is_empty() {
+        return Ok(Vec::new());
     }
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -293,35 +332,10 @@ pub fn rank<T>(
     Ok(out)
 }
 
-/// Vectors for specific rowids, for ranking a candidate set that was chosen by some other index.
-/// Rows with no vector yet are absent from the map rather than an error, since the backlog loop may not have reached them.
-pub fn vectors_for(
-    conn: &Connection,
-    table: &str,
-    key: &str,
-    rowids: &[i64],
-) -> Result<std::collections::HashMap<i64, Vec<f32>>> {
-    let sql = format!("SELECT embedding FROM {table} WHERE {key} = ?1");
-    let mut stmt = conn.prepare(&sql)?;
-    let mut out = std::collections::HashMap::with_capacity(rowids.len());
-    for id in rowids {
-        let blob: Option<Vec<u8>> = stmt
-            .query_row(params![id], |r| r.get(0))
-            .optional()
-            .unwrap_or(None);
-        if let Some(blob) = blob {
-            out.insert(*id, from_blob(&blob));
-        }
-    }
-    Ok(out)
-}
-
 /// Cosine similarity, higher is closer.
 /// Magnitude is divided out, so truncated vectors of any length compare correctly.
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let mut dot = 0.0f32;
-    let mut na = 0.0f32;
-    let mut nb = 0.0f32;
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
     for (x, y) in a.iter().zip(b) {
         dot += x * y;
         na += x * x;
@@ -333,6 +347,11 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     dot / (na.sqrt() * nb.sqrt())
 }
 
+/// sqlite-vec reads a float vector as raw little-endian f32.
+fn to_blob(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
 fn from_blob(b: &[u8]) -> Vec<f32> {
     b.as_chunks::<4>()
         .0
@@ -341,70 +360,43 @@ fn from_blob(b: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// sqlite-vec reads a float vector as raw little-endian f32.
-fn to_blob(v: &[f32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(v.len() * 4);
-    for x in v {
-        out.extend_from_slice(&x.to_le_bytes());
-    }
-    out
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    s.chars().take(max).collect()
-}
-
 /// Embeds whatever is not embedded yet, forever.
 ///
 /// One mechanism covers both the initial backfill and steady state, so there is no separate import path that can drift from the live one.
 /// Writes never block on the network: a new row is simply pending until this loop reaches it.
 pub async fn run(
-    embedder: Arc<Embedder>,
-    memory: Arc<Mutex<Memory>>,
-    archive: Arc<Mutex<Archive>>,
+    embedder: std::sync::Arc<Embedder>,
+    db: std::sync::Arc<Mutex<Connection>>,
     batch: usize,
 ) {
-    let idle = Duration::from_secs(60);
-
     loop {
         let mut worked = false;
-
-        match drain(&embedder, memory.as_ref(), batch).await {
-            Ok(0) => {}
-            Ok(n) => {
-                worked = true;
-                tracing::info!(count = n, "embedded memories");
+        for (label, drained) in [
+            ("memories", drain::<Memories>(&embedder, &db, batch).await),
+            ("messages", drain::<Messages>(&embedder, &db, batch).await),
+        ] {
+            match drained {
+                Ok(0) => {}
+                Ok(n) => {
+                    worked = true;
+                    tracing::info!(count = n, "embedded {label}");
+                }
+                Err(e) => tracing::warn!(error = %e, "embedding {label} failed"),
             }
-            Err(e) => tracing::warn!(error = %e, "embedding memories failed"),
-        }
-
-        match drain(&embedder, archive.as_ref(), batch).await {
-            Ok(0) => {}
-            Ok(n) => {
-                worked = true;
-                tracing::info!(count = n, "embedded messages");
-            }
-            Err(e) => tracing::warn!(error = %e, "embedding messages failed"),
         }
 
         // Pause between batches while catching up, and sleep properly once there is nothing left.
-        tokio::time::sleep(if worked { Duration::from_secs(2) } else { idle }).await;
+        tokio::time::sleep(Duration::from_secs(if worked { 2 } else { 60 })).await;
     }
 }
 
-async fn drain<S: Embeddable>(
+async fn drain<E: Embeddable>(
     embedder: &Embedder,
-    store: &Mutex<S>,
+    db: &Mutex<Connection>,
     batch: usize,
 ) -> Result<usize> {
     // The lock is released before the request: holding it across an await would stall every tool for the duration of the call.
-    let work = {
-        let store = store.lock().unwrap();
-        store.pending_embeddings(batch)?
-    };
+    let work = pending::<E>(&db.lock().unwrap(), batch)?;
     if work.is_empty() {
         return Ok(0);
     }
@@ -413,5 +405,5 @@ async fn drain<S: Embeddable>(
     let vectors = embedder.embed(&texts).await?;
     let rows: Vec<(i64, Vec<f32>)> = work.iter().map(|(id, _)| *id).zip(vectors).collect();
 
-    store.lock().unwrap().save_embeddings(&rows)
+    save::<E>(&mut db.lock().unwrap(), &rows)
 }

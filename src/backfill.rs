@@ -5,6 +5,7 @@
 //! Anything older comes back as ciphertext the server cannot help with, so it is counted and skipped rather than stored as noise.
 
 use anyhow::{Context, Result};
+use rusqlite::Connection;
 use std::sync::Mutex;
 
 use mxlink::MatrixLink;
@@ -13,7 +14,7 @@ use mxlink::matrix_sdk::ruma::events::{AnyMessageLikeEventContent, AnySyncTimeli
 use mxlink::matrix_sdk::ruma::{RoomId, UInt};
 
 use crate::config::Config;
-use crate::messages::Archive;
+use crate::messages;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -38,7 +39,7 @@ impl std::fmt::Display for Stats {
 pub async fn run(
     link: &MatrixLink,
     config: &Config,
-    archive: &Mutex<Archive>,
+    db: &Mutex<Connection>,
     max_pages: usize,
 ) -> Result<Stats> {
     let client = link.client();
@@ -78,8 +79,8 @@ pub async fn run(
                         body,
                         at,
                     } => {
-                        let guard = archive.lock().unwrap();
-                        match guard.record(&event_id, room_id, &sender, &body, &at) {
+                        let conn = db.lock().unwrap();
+                        match messages::record(&conn, &event_id, room_id, &sender, &body, &at) {
                             Ok(()) => total.archived += 1,
                             Err(e) => tracing::warn!(error = %e, "failed archiving"),
                         }

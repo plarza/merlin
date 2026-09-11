@@ -6,13 +6,10 @@ use std::sync::{Arc, Mutex};
 
 use merlin::agent::Agent;
 use merlin::config::{Config, Secrets};
-use merlin::cron::CronStore;
-use merlin::embed::Embedder;
+use merlin::embed::{Embedder, Memories, Messages};
 use merlin::exec::Sandbox;
 use merlin::llm::Llm;
 use merlin::matrix::Bot;
-use merlin::memory::Memory;
-use merlin::messages::Archive;
 use merlin::room::Buffers;
 use merlin::tools::Tools;
 use merlin::workspace::Workspace;
@@ -54,15 +51,17 @@ async fn main() -> Result<()> {
     }
 
     let config = Arc::new(Config::load(&config_path)?);
-    let memory_path = config.state_dir.join("memory.db");
+    let db_path = config.state_dir.join("merlin.db");
 
     // Import is a one-shot maintenance mode, not part of startup: it runs against the same schema the bot uses and then exits, so the result can be verified before anything goes live.
     if let Some(legacy) = import_from {
-        let mut memory = Memory::open(&memory_path)?;
-        let before = memory.count()?;
-        let taken = memory.import_legacy(&legacy)?;
-        let after = memory.count()?;
-        println!("imported {taken} rows ({before} -> {after} total)");
+        let mut conn = merlin::db::open(&db_path)?;
+        let before = merlin::memory::count(&conn)?;
+        let taken = merlin::memory::import_legacy(&mut conn, &legacy)?;
+        println!(
+            "imported {taken} rows ({before} -> {} total)",
+            merlin::memory::count(&conn)?
+        );
         return Ok(());
     }
 
@@ -73,17 +72,17 @@ async fn main() -> Result<()> {
         String::new()
     });
 
-    let memory = Arc::new(Mutex::new(Memory::open(&memory_path)?));
-    tracing::info!(count = memory.lock().unwrap().count()?, "memory ready");
-
-    let archive = Arc::new(Mutex::new(Archive::open(
-        &config.state_dir.join("messages.db"),
-    )?));
-    tracing::info!(count = archive.lock().unwrap().count()?, "archive ready");
-
-    let cron_store = Arc::new(Mutex::new(CronStore::open(
-        &config.state_dir.join("cron.db"),
-    )?));
+    let mut conn = merlin::db::open(&db_path)?;
+    match merlin::db::migrate_from_split_files(&mut conn, &config.state_dir)? {
+        0 => {}
+        rows => tracing::info!(rows, "folded the old split databases into one"),
+    }
+    tracing::info!(
+        memories = merlin::memory::count(&conn)?,
+        messages = merlin::messages::count(&conn)?,
+        "database ready"
+    );
+    let db = Arc::new(Mutex::new(conn));
 
     let llm = Arc::new(Llm::new(
         secrets.openrouter_api_key.clone(),
@@ -101,15 +100,14 @@ async fn main() -> Result<()> {
     )?);
 
     {
-        let memory = memory.lock().unwrap();
-        memory.enable_semantic(&config.model.embedding, embedder.dimensions())?;
-        let archive = archive.lock().unwrap();
-        archive.enable_semantic(&config.model.embedding, embedder.dimensions())?;
+        let conn = db.lock().unwrap();
+        merlin::embed::ensure_table::<Memories>(&conn, embedder.model(), embedder.dimensions())?;
+        merlin::embed::ensure_table::<Messages>(&conn, embedder.model(), embedder.dimensions())?;
         tracing::info!(
-            model = %config.model.embedding,
+            model = embedder.model(),
             dimensions = embedder.dimensions(),
-            memories = memory.pending_count()?,
-            messages = archive.pending_count()?,
+            memories = merlin::embed::count_pending::<Memories>(&conn)?,
+            messages = merlin::embed::count_pending::<Messages>(&conn)?,
             "semantic index ready"
         );
     }
@@ -132,9 +130,7 @@ async fn main() -> Result<()> {
         .build()?;
 
     let tools = Arc::new(Tools {
-        memory: Arc::clone(&memory),
-        archive: Arc::clone(&archive),
-        cron: Arc::clone(&cron_store),
+        db: Arc::clone(&db),
         sandbox,
         workspace,
         llm: Arc::clone(&llm),
@@ -174,7 +170,7 @@ async fn main() -> Result<()> {
     if let Some(pages) = backfill_pages {
         // Sync once so the client has joined rooms and whatever keys the server will hand over before we start reading history.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        let stats = merlin::backfill::run(&link, &config, &archive, pages).await?;
+        let stats = merlin::backfill::run(&link, &config, &db, pages).await?;
         println!("backfill: {stats}");
         if stats.undecryptable > stats.archived {
             println!(
@@ -188,17 +184,16 @@ async fn main() -> Result<()> {
 
     tokio::spawn(merlin::embed::run(
         embedder,
-        Arc::clone(&memory),
-        Arc::clone(&archive),
+        Arc::clone(&db),
         config.limits.embed_batch,
     ));
 
     // Refill the ambient buffer from the archive, so a restart does not leave the bot blind to what was just said.
     let buffers = Arc::new(Buffers::new(config.context_window));
     {
-        let archive = archive.lock().unwrap();
+        let conn = db.lock().unwrap();
         for room_id in &config.allowed_rooms {
-            match archive.recent(room_id, config.context_window) {
+            match merlin::messages::recent(&conn, room_id, config.context_window) {
                 Ok(rows) => {
                     let seeded = rows.len();
                     for row in rows {
@@ -221,12 +216,12 @@ async fn main() -> Result<()> {
         link,
         agent: Arc::clone(&agent),
         buffers,
-        archive: Arc::clone(&archive),
+        db: Arc::clone(&db),
         config: Arc::clone(&config),
     });
 
     // Started before sync so a job due at boot is not missed.
-    merlin::scheduler::start(Arc::clone(&cron_store), agent, Arc::clone(&bot)).await?;
+    merlin::scheduler::start(Arc::clone(&db), agent, Arc::clone(&bot)).await?;
 
     bot.run().await
 }

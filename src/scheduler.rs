@@ -8,14 +8,18 @@ use std::sync::{Arc, Mutex};
 use tokio_cron_scheduler::{Job as CronJob, JobScheduler};
 
 use crate::agent::{Agent, Incoming};
-use crate::cron::{CronStore, Job};
+use crate::cron::{self, Job};
 use crate::matrix::Bot;
 
 /// Start the scheduler and keep it in step with the store.
 ///
 /// Jobs the agent creates through `cron_create` land in SQLite, not in this process, so a reconcile loop picks them up.
 /// Without it a new job would only fire after a restart, which is not what "schedule this" should mean.
-pub async fn start(store: Arc<Mutex<CronStore>>, agent: Arc<Agent>, bot: Arc<Bot>) -> Result<()> {
+pub async fn start(
+    db: Arc<Mutex<rusqlite::Connection>>,
+    agent: Arc<Agent>,
+    bot: Arc<Bot>,
+) -> Result<()> {
     let scheduler = JobScheduler::new()
         .await
         .context("creating job scheduler")?;
@@ -27,11 +31,9 @@ pub async fn start(store: Arc<Mutex<CronStore>>, agent: Arc<Agent>, bot: Arc<Bot
         let mut live: HashMap<String, (uuid::Uuid, String)> = HashMap::new();
 
         loop {
-            let desired = {
-                match store.lock() {
-                    Ok(s) => s.list().unwrap_or_default(),
-                    Err(_) => Vec::new(),
-                }
+            let desired = match db.lock() {
+                Ok(conn) => cron::list(&conn).unwrap_or_default(),
+                Err(_) => Vec::new(),
             };
 
             let wanted: HashMap<String, Job> = desired
@@ -64,7 +66,7 @@ pub async fn start(store: Arc<Mutex<CronStore>>, agent: Arc<Agent>, bot: Arc<Bot
                 match register(
                     &scheduler,
                     job,
-                    Arc::clone(&store),
+                    Arc::clone(&db),
                     Arc::clone(&agent),
                     Arc::clone(&bot),
                 )
@@ -100,7 +102,7 @@ fn fingerprint(job: &Job) -> String {
 async fn register(
     scheduler: &JobScheduler,
     job: &Job,
-    store: Arc<Mutex<CronStore>>,
+    db: Arc<Mutex<rusqlite::Connection>>,
     agent: Arc<Agent>,
     bot: Arc<Bot>,
 ) -> Result<uuid::Uuid> {
@@ -110,7 +112,7 @@ async fn register(
 
     let cron_job = CronJob::new_async_tz(expr.as_str(), tz, move |_uuid, _lock| {
         let job = owned.clone();
-        let store = Arc::clone(&store);
+        let db = Arc::clone(&db);
         let agent = Arc::clone(&agent);
         let bot = Arc::clone(&bot);
 
@@ -122,8 +124,8 @@ async fn register(
                     format!("error: {e}")
                 }
             };
-            if let Ok(s) = store.lock() {
-                let _ = s.record_run(&job.name, &status);
+            if let Ok(conn) = db.lock() {
+                let _ = cron::record_run(&conn, &job.name, &status);
             }
         })
     })
