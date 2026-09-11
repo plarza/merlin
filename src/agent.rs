@@ -113,6 +113,7 @@ impl Agent {
                 let outcome = self.tools.dispatch(&call.function.name, &args, &ctx).await;
                 tracing::info!(
                     tool = %call.function.name,
+                    args = %summarise(&args),
                     ms = started.elapsed().as_millis() as u64,
                     "tool finished"
                 );
@@ -156,6 +157,29 @@ impl Agent {
         }
         Ok(result)
     }
+}
+
+/// One-line summary of a tool call's arguments, for the log.
+///
+/// Without this a log line says a URL was fetched but not which one, which makes it impossible to answer afterwards what the agent actually read.
+/// Values are truncated hard: the point is to identify the call, not to reproduce it, and a script or a file's contents would otherwise fill the journal.
+pub fn summarise(args: &serde_json::Value) -> String {
+    let Some(object) = args.as_object() else {
+        return String::new();
+    };
+
+    object
+        .iter()
+        .map(|(key, value)| {
+            let text = match value {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            format!("{key}={}", crate::truncate(&flat, 120))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Assemble the system prompt.

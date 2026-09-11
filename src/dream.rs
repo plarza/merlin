@@ -34,6 +34,7 @@ Be conservative. Forget something only when its content is genuinely captured \
 elsewhere or genuinely worthless.";
 
 /// Run one consolidation pass.
+/// `room_id` is where any job it creates would fire, not a filter: memory is pooled across rooms and this reviews all of it.
 pub async fn run(agent: &Agent, room_id: &str) -> Result<()> {
     let started = std::time::Instant::now();
 

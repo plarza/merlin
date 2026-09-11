@@ -28,6 +28,11 @@ pub async fn start(
 
     // Registered directly rather than stored in the cron table, so it cannot be
     // deleted by accident and appears without a migration.
+    //
+    // Memory is pooled across every allowed room, so dreaming runs once rather
+    // than per room. It still needs one room as its home, because a turn belongs
+    // to a room and any job it creates has to fire somewhere; the first allowed
+    // room is that home.
     if config.dreaming.enabled
         && let Some(room_id) = config.allowed_rooms.first()
     {

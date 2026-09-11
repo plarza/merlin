@@ -44,6 +44,8 @@ messages(event_id, room_id, sender, body, at)
 cron_jobs(name, schedule, timezone, prompt, room_id, enabled, created_at, last_run, last_status)
 ```
 
+memory and the archive are pooled across every allowed room: `memories.room_id` records where something was learned but nothing filters on it, and `search_messages` spans all rooms. only the ambient buffer is per-room, so one room's chatter is never context in another.
+
 `memories.key` is unique; storing an existing key updates that row. there is no agent or tenant column, so renaming the bot needs no migration. `messages.event_id` is the primary key, so a sync replay inserts nothing.
 
 three FTS5 indexes: `memories_fts`, `messages_fts`, and `messages_trigram` with the trigram tokenizer. two sqlite-vec `vec0` tables hold embeddings keyed by rowid. `embedding_meta` records the model and width each was built with; changing either drops the table and re-embeds, since a `vec0` table fixes its dimension at creation.

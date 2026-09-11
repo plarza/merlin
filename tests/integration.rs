@@ -858,3 +858,32 @@ async fn the_run_limits_reach_the_sandbox_as_arguments() {
         "timeout in seconds, then the address space limit in kB"
     );
 }
+
+#[test]
+fn a_tool_call_is_logged_with_enough_to_identify_it() {
+    // The log recorded that a fetch happened but not what was fetched, which made
+    // "what did it read?" unanswerable after the fact.
+    let line = merlin::agent::summarise(&serde_json::json!({
+        "url": "https://example.com/thing",
+        "limit": 8
+    }));
+    assert!(
+        line.contains("url=https://example.com/thing"),
+        "got: {line}"
+    );
+    assert!(line.contains("limit=8"), "got: {line}");
+
+    // A whole script would otherwise fill the journal, and newlines would break the line.
+    let long = merlin::agent::summarise(&serde_json::json!({
+        "script": format!("echo one\n{}", "x".repeat(500))
+    }));
+    assert!(
+        long.len() < 200,
+        "a long argument must be cut: {}",
+        long.len()
+    );
+    assert!(
+        !long.contains('\n'),
+        "a logged argument must stay on one line"
+    );
+}
