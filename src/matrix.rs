@@ -10,8 +10,8 @@ use mxlink::matrix_sdk::ruma::events::room::message::{
 };
 use mxlink::matrix_sdk::ruma::events::typing::SyncTypingEvent;
 use mxlink::{
-    CallbackError, InitConfig, LoginConfig, LoginCredentials, LoginEncryption, MatrixLink,
-    MessageResponseType, PersistenceConfig,
+    CallbackError, InitConfig, LoginConfig, LoginCredentials, MatrixLink, MessageResponseType,
+    PersistenceConfig,
 };
 
 use crate::agent::{Agent, Incoming};
@@ -77,12 +77,12 @@ pub async fn connect(config: &Config, secrets: &Secrets) -> Result<MatrixLink> {
         secrets.matrix_password.clone(),
     );
 
-    let encryption = LoginEncryption::new(secrets.matrix_recovery_passphrase.clone(), false);
-
+    // No recovery config: this account keeps no key backup, so there is nothing
+    // to recover from. Room keys reach the device by --import-keys or not at all.
     let login = LoginConfig::new(
         config.homeserver.clone(),
         credentials,
-        Some(encryption),
+        None,
         config.display_name.clone(),
     );
 
@@ -151,7 +151,7 @@ impl Bot {
         }
 
         let sender = event.sender.to_string();
-        self.remember(&event, &room_id, &sender, &body);
+        self.remember(event.event_id.as_str(), &room_id, &sender, &body);
 
         let reply_parent = self.reply_parent(&room, &event).await;
         if !self.should_answer(&event, &body, &sender, reply_parent.as_ref()) {
@@ -169,13 +169,7 @@ impl Bot {
         .await
     }
 
-    fn remember(
-        &self,
-        event: &OriginalSyncRoomMessageEvent,
-        room_id: &str,
-        sender: &str,
-        body: &str,
-    ) {
+    fn remember(&self, event_id: &str, room_id: &str, sender: &str, body: &str) {
         self.buffers.push(
             room_id,
             Turn {
@@ -186,11 +180,22 @@ impl Bot {
 
         let at = chrono::Utc::now().to_rfc3339();
         let conn = self.db.lock().unwrap();
-        if let Err(e) =
-            crate::messages::record(&conn, event.event_id.as_str(), room_id, sender, body, &at)
-        {
+        if let Err(e) = crate::messages::record(&conn, event_id, room_id, sender, body, &at) {
             tracing::warn!(error = %e, "failed archiving message");
         }
+    }
+
+    // The sync handler only ever sees other people: the SDK drops the bot's own
+    // events before the callback. Anything merlin says has to be remembered on
+    // the way out or it is gone, leaving him reading a transcript of a
+    // conversation he appears to take no part in.
+    fn remember_own(&self, room: &Room, event_id: &str, body: &str) {
+        self.remember(
+            event_id,
+            room.room_id().as_str(),
+            &self.config.user_id,
+            body,
+        );
     }
 
     fn should_answer(
@@ -419,16 +424,19 @@ impl Bot {
 
     async fn send_text(&self, room: &Room, text: &str) -> Result<()> {
         let mut content = RoomMessageEventContent::text_plain(text);
-        self.link
+        let sent = self
+            .link
             .messaging()
             .send_event(room, &mut content, MessageResponseType::InRoom)
             .await
             .map_err(|e| anyhow::anyhow!("sending message failed: {e:?}"))?;
+        self.remember_own(room, sent.event_id.as_str(), text);
         Ok(())
     }
 
     async fn send_image(&self, room: &Room, image: crate::agent::Image) -> Result<()> {
         let mime: mxlink::mime::Mime = image.media_type.parse().unwrap_or(mxlink::mime::IMAGE_PNG);
+        let caption = image.caption.clone();
 
         let mut content = self
             .link
@@ -437,11 +445,15 @@ impl Bot {
             .await
             .map_err(|e| anyhow::anyhow!("uploading image failed: {e:?}"))?;
 
-        self.link
+        let sent = self
+            .link
             .messaging()
             .send_event(room, &mut content, MessageResponseType::InRoom)
             .await
             .map_err(|e| anyhow::anyhow!("sending image failed: {e:?}"))?;
+        // Same shape an incoming attachment is archived under, so the
+        // transcript reads consistently whoever sent the picture.
+        self.remember_own(room, sent.event_id.as_str(), &format!("[file] {caption}"));
         Ok(())
     }
 }

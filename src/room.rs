@@ -59,10 +59,9 @@ pub fn is_addressed(
         return true;
     }
 
-    if !m_mentions.is_empty() {
-        return m_mentions.iter().any(|id| id == user_id);
+    if m_mentions.iter().any(|id| id == user_id) {
+        return true;
     }
-
     let haystack = body.to_lowercase();
     if haystack.contains(&user_id.to_lowercase()) {
         return true;

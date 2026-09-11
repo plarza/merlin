@@ -193,7 +193,8 @@ fn system_prompt(soul: &str, incoming: &Incoming<'_>, now: &str) -> String {
     if let Some(ambient) = &incoming.ambient {
         prompt.push_str(&format!(
             "\n\n## recent room conversation\n\n\
-             Messages you were not addressed in, for context. Do not reply to them.\n\n{ambient}\n"
+             The room's recent messages, your own among them, each prefixed with who sent it. \
+             Context only: answer the message above, not these.\n\n{ambient}\n"
         ));
     }
 

@@ -56,7 +56,7 @@ cron_create(name="hn", schedule="0 7 * * *", prompt="post the top Hacker News st
 
 ## setup
 
-**1. matrix.** register an account for the bot on your homeserver and sign into it once from a normal client. merlin never accepts invitations, so use that session to join every room it should answer in, and turn on secure backup — the passphrase it gives you becomes `MATRIX_RECOVERY_PASSPHRASE`, and without it a fresh login has no room keys and reads nothing. take the internal room id out of the room's settings (`!abc:matrix.example.org`, not the `#alias`); `allowed_rooms` matches on that.
+**1. matrix.** register an account for the bot on your homeserver and sign into it once from a normal client. merlin never accepts invitations, so use that session to join every room it should answer in, and keep it: merlin keeps no key backup, so that session is where room keys for older history have to come from. take the internal room id out of the room's settings (`!abc:matrix.example.org`, not the `#alias`); `allowed_rooms` matches on that.
 
 **2. keys.** `OPENROUTER_API_KEY` drives both chat and embeddings, so it is never optional. `EXA_API_KEY` is only read by `web_search`, `FAL_API_KEY` only when `image_provider = "fal"`.
 
@@ -93,7 +93,7 @@ the default sandbox runner is a NixOS path, so set `MERLIN_EXEC_RUNNER` to your 
 merlin --config ./config.toml --backfill 50
 ```
 
-if that reports mostly undecryptable events, the account's key backup never reached this device: export the keys from the client you set up in step 1 and `--import-keys` them, with the export passphrase in `MATRIX_KEY_EXPORT_PASSPHRASE`.
+if that reports mostly undecryptable events, this device simply has no room keys for them: export the keys from the client you set up in step 1 and `--import-keys` them, with the export passphrase in `MATRIX_KEY_EXPORT_PASSPHRASE`.
 
 > the session blob is keyed on `MATRIX_PASSWORD`, so rotating the password orphans it and forces a new device. set `SESSION_ENCRYPTION_KEY` to something stable up front if you expect to rotate.
 
@@ -133,7 +133,6 @@ embed_batch        = 32
 | `OPENROUTER_API_KEY` | yes |
 | `EXA_API_KEY` | for `web_search` |
 | `FAL_API_KEY` | when `image_provider = "fal"` (`FAL_KEY` also accepted) |
-| `MATRIX_RECOVERY_PASSPHRASE` | for key backup recovery |
 | `MATRIX_KEY_EXPORT_PASSPHRASE` | for `--import-keys` |
 | `SESSION_ENCRYPTION_KEY` | no, defaults to `MATRIX_PASSWORD` |
 | `MERLIN_ALLOWED_ROOMS`, `MERLIN_ALLOWED_SENDERS` | override the config file |

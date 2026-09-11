@@ -501,7 +501,7 @@ fn a_turn_starts_only_when_the_bot_is_actually_addressed() {
 }
 
 #[test]
-fn an_explicit_mention_list_decides_in_both_directions() {
+fn an_explicit_mention_addresses_the_bot_without_naming_it() {
     assert!(is_addressed(
         "can you look at this",
         &[UID.into()],
@@ -510,8 +510,24 @@ fn an_explicit_mention_list_decides_in_both_directions() {
         "merlin",
         false
     ));
+}
+
+#[test]
+fn someone_elses_mention_does_not_suppress_the_name() {
+    // What a reply looks like: Element attaches an m.mentions for the person
+    // being replied to, which used to make the bot ignore its own name.
+    assert!(is_addressed(
+        "merlin do a security review",
+        &["@bob:example.org".to_string()],
+        UID,
+        "merlin",
+        "merlin",
+        false
+    ));
+
+    // Still nothing to answer when the name is absent.
     assert!(!is_addressed(
-        "merlin is a bird",
+        "bob can you look at this",
         &["@bob:example.org".to_string()],
         UID,
         "merlin",

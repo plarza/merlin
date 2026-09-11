@@ -273,8 +273,7 @@ async fn backfill_history(
     if stats.undecryptable > stats.archived {
         println!(
             "most events could not be decrypted: this device has no room keys for them. \
-             Set up Secure Backup on the account and provide MATRIX_RECOVERY_PASSPHRASE, \
-             or share keys to this device from a session that has them."
+             Export them from a session that has them and load them with --import-keys."
         );
     }
     Ok(())

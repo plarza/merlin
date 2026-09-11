@@ -67,7 +67,6 @@ pub struct Limits {
 #[derive(Clone)]
 pub struct Secrets {
     pub matrix_password: String,
-    pub matrix_recovery_passphrase: Option<String>,
     pub session_encryption_key: String,
     pub openrouter_api_key: String,
     pub exa_api_key: Option<String>,
@@ -126,7 +125,6 @@ impl Secrets {
     pub fn from_env() -> Result<Self> {
         Ok(Self {
             matrix_password: req("MATRIX_PASSWORD")?,
-            matrix_recovery_passphrase: opt("MATRIX_RECOVERY_PASSPHRASE"),
             session_encryption_key: opt("SESSION_ENCRYPTION_KEY")
                 .unwrap_or_else(|| req("MATRIX_PASSWORD").unwrap_or_default()),
             openrouter_api_key: req("OPENROUTER_API_KEY")?,

@@ -69,9 +69,8 @@ in
       default = null;
       description = ''
         Systemd EnvironmentFile carrying every credential: MATRIX_PASSWORD,
-        OPENROUTER_API_KEY, EXA_API_KEY and optionally
-        MATRIX_RECOVERY_PASSPHRASE. Nothing secret belongs in {option}`settings`,
-        which is rendered world-readable into the Nix store.
+        OPENROUTER_API_KEY and EXA_API_KEY. Nothing secret belongs in
+        {option}`settings`, which is rendered world-readable into the Nix store.
       '';
     };
 
