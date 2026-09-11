@@ -9,8 +9,6 @@
 **a pico openclaw alternative with a pointy hat**
 </div>
 
-
-
 ## tools
 
 | tool | arguments |
