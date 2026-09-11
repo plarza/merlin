@@ -45,10 +45,6 @@ futures-util = { version = "0.3.34", default-features = false, features = [
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }
 
 [profile.release]
-# Cross-crate inlining and a single codegen unit trade build time for a smaller,
-# faster binary, and strip drops symbols that only matter to a debugger.
-# panic is deliberately left unwinding: a panic in one tool should not take the
-# whole bot down with it.
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 strip = true

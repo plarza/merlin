@@ -8,6 +8,7 @@ use mxlink::matrix_sdk::ruma::api::client::typing::create_typing_event;
 use mxlink::matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
 };
+use mxlink::matrix_sdk::ruma::events::typing::SyncTypingEvent;
 use mxlink::{
     CallbackError, InitConfig, LoginConfig, LoginCredentials, LoginEncryption, MatrixLink,
     MessageResponseType, PersistenceConfig,
@@ -116,6 +117,15 @@ impl Bot {
                     }
                     Ok::<(), CallbackError>(())
                 }
+            });
+
+        link.client()
+            .add_event_handler(|ev: SyncTypingEvent, room: Room| async move {
+                tracing::info!(
+                    room_id = %room.room_id(),
+                    typing = ?ev.content.user_ids,
+                    "typing state broadcast by the server"
+                );
             });
 
         link.start()
@@ -259,6 +269,8 @@ impl Bot {
                     if let Err(e) = bot.send_text(&room, &text).await {
                         tracing::warn!(error = %e, "failed sending an intermediate message");
                     }
+                    let _ = set_typing(&room, false).await;
+                    let _ = set_typing(&room, true).await;
                 }
             })
         };
