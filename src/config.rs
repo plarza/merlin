@@ -26,9 +26,6 @@ pub struct Config {
     #[serde(default)]
     pub limits: Limits,
 
-    #[serde(default)]
-    pub dreaming: Dreaming,
-
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
 }
@@ -65,14 +62,6 @@ pub struct Limits {
     pub exec_memory_max: String,
     #[serde(default = "default_embed_batch")]
     pub embed_batch: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Dreaming {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default = "default_dream_schedule")]
-    pub schedule: String,
 }
 
 #[derive(Clone)]
@@ -198,8 +187,6 @@ defaults! {
     default_request_timeout_s  -> u64     = 120u64;
     default_exec_timeout_s     -> u64     = 60u64;
     default_turn_timeout_s     -> u64     = 600u64;
-    default_dream_schedule     -> String  = "0 5 * * *";
-    default_true               -> bool    = true;
     default_exec_memory_max    -> String  = "1G";
     default_state_dir          -> PathBuf = PathBuf::from("/var/lib/merlin");
 }
@@ -214,4 +201,4 @@ macro_rules! default_via_serde {
     };
 }
 
-default_via_serde!(ModelConfig, Limits, Dreaming);
+default_via_serde!(ModelConfig, Limits);

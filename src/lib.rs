@@ -3,7 +3,6 @@ pub mod backfill;
 pub mod config;
 pub mod cron;
 pub mod db;
-pub mod dream;
 pub mod embed;
 pub mod exec;
 pub mod image;

@@ -185,7 +185,7 @@ impl Runtime {
             config: Arc::clone(&config),
         });
 
-        scheduler::start(self.db, self.agent, Arc::clone(&bot), config).await?;
+        scheduler::start(self.db, self.agent, Arc::clone(&bot)).await?;
         bot.run().await
     }
 }
