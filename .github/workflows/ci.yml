@@ -71,12 +71,17 @@ jobs:
       - run: nix build .#merlin --print-build-logs
       - run: nix build .#merlin-sandbox --print-build-logs
 
-      # Ubuntu 24.04 runners restrict unprivileged user namespaces through
-      # AppArmor, which is exactly what bubblewrap needs. Without this the
-      # sandbox cannot start and the smoke test fails on the runner rather than
-      # on anything wrong with the sandbox.
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor,
+      # which is what bubblewrap needs. The knob does not exist on every kernel,
+      # so its absence is fine and only a failure to clear a present one is not.
       - name: allow unprivileged user namespaces
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: |
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$knob" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          else
+            echo "no AppArmor userns restriction on this runner"
+          fi
 
       - name: sandbox smoke test
         run: |
