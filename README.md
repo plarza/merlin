@@ -110,14 +110,14 @@ timezone        = "Australia/Sydney"
 
 [model]
 chat                 = "z-ai/glm-5.3-flash"
-reasoning_effort     = "low"
+reasoning_effort     = "medium"
 image                = "meta/muse-image"
 embedding            = "google/gemini-embedding-001"
 embedding_dimensions = 768
 
 [limits]
 max_response_bytes = 8388608
-tool_iterations    = 32
+tool_iterations    = 64
 request_timeout_s  = 120
 exec_timeout_s     = 300
 exec_memory_max    = "1G"

@@ -212,12 +212,12 @@ defaults! {
     default_timezone           -> String  = "Australia/Sydney";
     default_chat_model         -> String  = "z-ai/glm-5.3-flash";
     default_image_model        -> String  = "meta/muse-image";
-    default_reasoning_effort   -> String  = "low";
+    default_reasoning_effort   -> String  = "medium";
     default_embedding_model    -> String  = "google/gemini-embedding-001";
     default_embedding_dimensions -> usize = 768usize;
     default_embed_batch        -> usize   = 32usize;
     default_max_response_bytes -> usize   = 8usize * 1024 * 1024;
-    default_tool_iterations    -> usize   = 32usize;
+    default_tool_iterations    -> usize   = 64usize;
     default_request_timeout_s  -> u64     = 120u64;
     default_exec_timeout_s     -> u64     = 60u64;
     default_turn_timeout_s     -> u64     = 600u64;

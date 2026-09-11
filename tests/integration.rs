@@ -875,15 +875,30 @@ fn a_tool_call_is_logged_with_enough_to_identify_it() {
 
     // A whole script would otherwise fill the journal, and newlines would break the line.
     let long = merlin::agent::summarise(&serde_json::json!({
-        "script": format!("echo one\n{}", "x".repeat(500))
+        "script": format!("echo one\n{}", "x".repeat(4000))
     }));
     assert!(
-        long.len() < 200,
+        long.len() < 700,
         "a long argument must be cut: {}",
         long.len()
     );
     assert!(
         !long.contains('\n'),
         "a logged argument must stay on one line"
+    );
+
+    // The cut has to leave a whole query behind. A turn once spent twenty rounds
+    // failing at SQL and the journal held only the first clause of each attempt,
+    // so there was nothing to re-run afterwards to see which one was wrong.
+    let query = format!(
+        "WITH RECURSIVE split(sender, w, rest) AS (SELECT sender, '', lower(body) || ' ' \
+         FROM messages UNION ALL SELECT sender, substr(rest, 1, instr(rest, ' ') - 1), \
+         substr(rest, instr(rest, ' ') + 1) FROM split WHERE rest <> '')\n{}",
+        "SELECT w FROM split;"
+    );
+    let logged = merlin::agent::summarise(&serde_json::json!({ "query": query.clone() }));
+    assert!(
+        logged.contains("SELECT w FROM split;"),
+        "a realistic query must survive whole: {logged}"
     );
 }

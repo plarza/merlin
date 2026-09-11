@@ -6,13 +6,19 @@ use std::sync::Arc;
 use crate::llm::{Attachment, Llm, Message};
 use crate::tools::{Ctx, Outcome, Tools, definitions};
 
+/// How much of a tool call is kept in the journal, applied to the arguments and
+/// to the result alike. Generous enough to hold a whole query and the error it
+/// produced, because the point of the record is reconstructing a turn that went
+/// wrong, and a query cut off mid-clause cannot be run again to see what it did.
+const LOG_CHARS: usize = 512;
+
 pub struct Agent {
     pub llm: Arc<Llm>,
     pub tools: Arc<Tools>,
     pub soul: String,
     pub max_iterations: usize,
     /// Wall-clock ceiling for one turn.
-    /// The iteration count alone does not bound anything: thirty-two rounds each running code for five minutes is hours.
+    /// The iteration count alone does not bound anything: sixty-four rounds each running code for five minutes is hours.
     pub max_duration: std::time::Duration,
     pub timezone: chrono_tz::Tz,
 }
@@ -111,15 +117,17 @@ impl Agent {
 
                 let started = std::time::Instant::now();
                 let outcome = self.tools.dispatch(&call.function.name, &args, &ctx).await;
+                let rendered = outcome.for_model();
                 tracing::info!(
                     tool = %call.function.name,
                     args = %summarise(&args),
                     ms = started.elapsed().as_millis() as u64,
+                    result = %flatten(&rendered, LOG_CHARS),
                     "tool finished"
                 );
                 result.tools_used.push(call.function.name.clone());
 
-                messages.push(Message::tool_result(&call.id, outcome.for_model()));
+                messages.push(Message::tool_result(&call.id, rendered));
 
                 if let Outcome::Image {
                     bytes,
@@ -162,7 +170,7 @@ impl Agent {
 /// One-line summary of a tool call's arguments, for the log.
 ///
 /// Without this a log line says a URL was fetched but not which one, which makes it impossible to answer afterwards what the agent actually read.
-/// Values are truncated hard: the point is to identify the call, not to reproduce it, and a script or a file's contents would otherwise fill the journal.
+/// Values are truncated, but with enough room to re-run what was recorded: a query cut off mid-clause cannot be tested against the database afterwards.
 pub fn summarise(args: &serde_json::Value) -> String {
     let Some(object) = args.as_object() else {
         return String::new();
@@ -175,11 +183,16 @@ pub fn summarise(args: &serde_json::Value) -> String {
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-            format!("{key}={}", crate::truncate(&flat, 120))
+            format!("{key}={}", flatten(&text, LOG_CHARS))
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Collapse a value onto one line for the journal, since a multi-line query or
+/// result would otherwise break the record into fragments that cannot be grepped.
+fn flatten(text: &str, max: usize) -> String {
+    crate::truncate(&text.split_whitespace().collect::<Vec<_>>().join(" "), max)
 }
 
 /// Assemble the system prompt.
