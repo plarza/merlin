@@ -1,5 +1,3 @@
-//! merlin, a Matrix assistant.
-
 pub mod agent;
 pub mod backfill;
 pub mod config;
@@ -19,8 +17,6 @@ pub mod scheduler;
 pub mod tools;
 pub mod workspace;
 
-/// Cut a string to a byte budget on a character boundary.
-/// Shared because both tool output and sandbox output need it and neither owns it.
 pub fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();

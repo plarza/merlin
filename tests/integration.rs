@@ -1,8 +1,3 @@
-//! End to end tests against a real database and real processes.
-//!
-//! Everything here goes through the public API on real files, so a passing run means the SQLite schema, the FTS indexes and the process plumbing actually work,
-//! not that a helper returns what it was told to.
-
 use merlin::cron::{self, Job};
 use merlin::embed::{self, Memories, Messages};
 use merlin::exec::Sandbox;
@@ -12,7 +7,6 @@ use merlin::tools::definitions;
 use merlin::{db, memory, messages};
 use rusqlite::Connection;
 
-/// A unique directory per test, so runs do not share state.
 fn scratch(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "merlin-test-{name}-{}-{}",
@@ -29,8 +23,6 @@ fn scratch(name: &str) -> std::path::PathBuf {
 fn database(name: &str) -> Connection {
     db::open(&scratch(name).join("merlin.db")).unwrap()
 }
-
-// ── memory ──────────────────────────────────────────────────────────────────
 
 #[test]
 fn memory_survives_reopening_and_recalls_by_keyword() {
@@ -54,7 +46,6 @@ fn memory_survives_reopening_and_recalls_by_keyword() {
             None,
         )
         .unwrap();
-        // Re-filing the same subject revises it.
         memory::store(
             &db,
             "kettle",
@@ -79,11 +70,8 @@ fn memory_survives_reopening_and_recalls_by_keyword() {
         "the revision must win"
     );
 
-    // Punctuation alone is not an FTS expression; it must miss rather than error.
     assert!(memory::recall(&db, "!!!", None, 5).is_ok());
 }
-
-// ── message search ──────────────────────────────────────────────────────────
 
 fn seeded_archive(name: &str) -> Connection {
     let db = database(name);
@@ -129,7 +117,6 @@ fn quoted_terms_are_required_and_combine_with_fuzzy_ones() {
     assert_eq!(hits.len(), 1);
     assert!(hits[0].body.contains("2018"));
 
-    // A quoted term is exact, so a near miss must not match.
     assert_eq!(
         messages::search(&db, "\"gymnast\"", None, 5).unwrap().len(),
         1
@@ -181,13 +168,10 @@ fn an_event_is_archived_once_however_often_sync_replays_it() {
     assert_eq!(messages::count(&db).unwrap(), 1);
 }
 
-// ── one database ────────────────────────────────────────────────────────────
-
 #[test]
 fn the_three_old_databases_are_folded_into_one() {
     let dir = scratch("migrate");
 
-    // Three separate files, as an older deployment left them.
     {
         let old = db::open(&dir.join("memory.db")).unwrap();
         memory::store(&old, "kept", "this must survive", "core", None).unwrap();
@@ -217,12 +201,10 @@ fn the_three_old_databases_are_folded_into_one() {
     assert_eq!(messages::count(&db).unwrap(), 1);
     assert_eq!(cron::list(&db).unwrap().len(), 1);
 
-    // The originals are moved aside rather than deleted, and a second run is a no-op.
     assert!(dir.join("memory.db.migrated").exists());
     assert!(!dir.join("memory.db").exists());
     assert_eq!(db::migrate_from_split_files(&mut db, &dir).unwrap(), 0);
 
-    // The FTS triggers fired on the copy, so the migrated rows are searchable.
     assert_eq!(memory::recall(&db, "survive", None, 5).unwrap().len(), 1);
     assert_eq!(messages::search(&db, "\"must\"", None, 5).unwrap().len(), 1);
 }
@@ -234,7 +216,6 @@ fn sql_queries_can_read_everything_and_write_nothing() {
     memory::store(&db, "b", "second note", "daily", None).unwrap();
     messages::record(&db, "$1", "!r:x", "@sam:x", "hello", "2026-01-01T00:00:00Z").unwrap();
 
-    // A question neither search tool shapes well: grouping across a table.
     let out = db::query(
         &db,
         "SELECT category, count(*) FROM memories GROUP BY category",
@@ -244,7 +225,6 @@ fn sql_queries_can_read_everything_and_write_nothing() {
     assert!(out.contains("core | 1"), "got: {out}");
     assert!(out.contains("daily | 1"), "got: {out}");
 
-    // The tables now live together, so one query can span them.
     let out = db::query(
         &db,
         "SELECT (SELECT count(*) FROM memories) AS m, (SELECT count(*) FROM messages) AS n",
@@ -278,10 +258,6 @@ fn sql_queries_can_read_everything_and_write_nothing() {
     assert!(db::query(&db, "SELECT nonsense syntax(", 50).is_err());
 }
 
-// ── semantic search ─────────────────────────────────────────────────────────
-
-/// A stand-in embedding with three axes the tests can reason about, so a "nearest" result is checkable rather than opaque.
-/// The real model returns 768 components; the storage and ranking path is identical either way.
 fn vector(x: f32, y: f32, z: f32) -> Vec<f32> {
     vec![x, y, z]
 }
@@ -314,7 +290,6 @@ fn semantic_recall_ranks_memories_by_direction_not_magnitude() {
         "nothing is embedded until the loop runs"
     );
 
-    // Deliberately not unit length: Matryoshka truncation returns short vectors, so cosine has to rank on direction alone.
     embed_all::<Memories>(&mut db, |text| {
         if text.contains("heating") {
             vector(0.31, 0.0, 0.0)
@@ -324,7 +299,6 @@ fn semantic_recall_ranks_memories_by_direction_not_magnitude() {
     });
     assert!(embed::pending::<Memories>(&db, 10).unwrap().is_empty());
 
-    // A query along the heating axis at a wildly different scale.
     let hits = memory::recall(&db, "heating trouble", Some(&vector(9.7, 0.0, 0.0)), 2).unwrap();
     assert_eq!(hits[0].key, "boiler");
     assert_eq!(hits[1].key, "parking");
@@ -339,7 +313,6 @@ fn revising_a_memory_re_embeds_it() {
     embed_all::<Memories>(&mut db, |_| vector(1.0, 0.0, 0.0));
     assert!(embed::pending::<Memories>(&db, 10).unwrap().is_empty());
 
-    // The row keeps its rowid, so a stale vector would go on describing the old text.
     memory::store(
         &db,
         "kettle",
@@ -370,7 +343,6 @@ fn forgetting_a_memory_takes_its_vector_with_it() {
         "a deleted memory must not still be reachable by meaning, found {hits:?}"
     );
 
-    // SQLite hands the freed rowid to the next insert, so a surviving vector would answer for an unrelated memory.
     memory::store(&db, "fresh", "something else entirely", "core", None).unwrap();
     assert_eq!(
         embed::pending::<Memories>(&db, 10).unwrap().len(),
@@ -387,7 +359,6 @@ fn changing_the_embedding_model_discards_incompatible_vectors() {
     embed_all::<Memories>(&mut db, |_| vector(1.0, 0.0, 0.0));
     assert!(embed::pending::<Memories>(&db, 10).unwrap().is_empty());
 
-    // A different width cannot be compared against the stored vectors at all.
     embed::ensure_table::<Memories>(&db, "test/other-model", 4).unwrap();
     assert_eq!(
         embed::pending::<Memories>(&db, 10).unwrap().len(),
@@ -401,7 +372,6 @@ fn quoted_terms_filter_and_the_rest_ranks_by_meaning() {
     let mut db = database("semantic-combined");
     embed::ensure_table::<Messages>(&db, MODEL, 3).unwrap();
 
-    // Two mention 2025, one does not. Two are about the world cup, one is not.
     for (i, (sender, body)) in [
         ("@sam:x", "the world cup final was in 2025"),
         ("@lee:x", "quarterly revenue for 2025 was strong"),
@@ -428,7 +398,6 @@ fn quoted_terms_filter_and_the_rest_ranks_by_meaning() {
         }
     });
 
-    // `world cup "2025"`: 2025 is a requirement, the rest is meaning.
     let bodies: Vec<String> =
         messages::search(&db, "world cup \"2025\"", Some(&vector(1.0, 0.0, 0.0)), 5)
             .unwrap()
@@ -472,7 +441,6 @@ fn an_all_quoted_query_stays_exact() {
         "2026-01-02T00:00:00Z",
     )
     .unwrap();
-    // Identical vectors, so only the exact filter can separate them.
     embed_all::<Messages>(&mut db, |_| vector(1.0, 0.0, 0.0));
 
     let hits = messages::search(&db, "\"invoice\"", None, 5).unwrap();
@@ -494,14 +462,10 @@ fn search_falls_back_to_matching_text_when_nothing_is_embedded_yet() {
     )
     .unwrap();
 
-    // Mid-backfill every row is pending, so ranking by meaning has nothing to work with.
-    // Returning nothing until it finishes would be worse than approximate matches.
     let hits = messages::search(&db, "shoelase", Some(&vector(1.0, 0.0, 0.0)), 5).unwrap();
     assert_eq!(hits.len(), 1, "the fallback must still answer");
     assert_eq!(hits[0].body, "the shoelace snapped");
 }
-
-// ── addressing ──────────────────────────────────────────────────────────────
 
 const UID: &str = "@merlin:example.org";
 
@@ -516,13 +480,11 @@ fn a_turn_starts_only_when_the_bot_is_actually_addressed() {
     assert!(addressed("@merlin hello"));
     assert!(addressed("ask @merlin:example.org about it"));
 
-    // Word boundary, so the bird and the wizard do not wake it.
     assert!(!addressed("merlinesque behaviour"));
     assert!(!addressed("submerlin"));
     assert!(!addressed("what do you reckon about the game"));
     assert!(!addressed(""));
 
-    // A reply to the bot counts even with no name in the body.
     assert!(is_addressed(
         "what did you mean",
         &[],
@@ -579,13 +541,10 @@ fn ambient_context_keeps_the_newest_messages_per_room() {
         "oldest evicted, sender labelled"
     );
 
-    // skip_last drops the message being answered.
     assert_eq!(b.render("!a", true).unwrap(), "@x: 2\n@x: 3");
     assert_eq!(b.render("!b", false).unwrap(), "@y: other room");
     assert!(b.render("!missing", false).is_none());
 }
-
-// ── scheduling ──────────────────────────────────────────────────────────────
 
 fn job(name: &str, schedule: &str) -> Job {
     Job {
@@ -621,7 +580,6 @@ fn jobs_persist_edit_in_place_and_delete() {
 #[test]
 fn crontab_syntax_is_accepted_and_nonsense_is_refused() {
     assert!(job("hn", "0 7 * * *").validate().is_ok());
-    // Five fields gain a seconds column for the scheduler.
     assert_eq!(job("hn", "0 7 * * *").six_field_schedule(), "0 0 7 * * *");
     assert_eq!(
         job("hn", "30 0 7 * * *").six_field_schedule(),
@@ -636,8 +594,6 @@ fn crontab_syntax_is_accepted_and_nonsense_is_refused() {
     unnamed.name = "  ".into();
     assert!(unnamed.validate().is_err());
 }
-
-// ── sandbox ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn the_sandbox_runs_a_program_and_returns_its_output() {
@@ -667,14 +623,11 @@ async fn a_wedged_program_is_killed_rather_than_hanging_the_turn() {
     assert!(out.stderr.contains("killed"));
 }
 
-// ── model wire format ───────────────────────────────────────────────────────
-
 #[test]
 fn tool_results_and_calls_match_the_openai_wire_format() {
     let result = serde_json::to_value(Message::tool_result("call_1", "42")).unwrap();
     assert_eq!(result["role"], "tool");
     assert_eq!(result["tool_call_id"], "call_1");
-    // An empty tool_calls list must not appear on a tool result.
     assert!(result.get("tool_calls").is_none());
 
     let parsed: Message = serde_json::from_value(serde_json::json!({
@@ -704,11 +657,9 @@ fn a_message_with_images_serialises_as_multipart_content() {
     assert_eq!(parts[0]["type"], "text");
     assert_eq!(parts[0]["text"], "look at this");
     assert_eq!(parts[1]["type"], "image_url");
-    // Inlined as a data URI carrying the declared media type.
     let url = parts[1]["image_url"]["url"].as_str().unwrap();
     assert!(url.starts_with("data:image/png;base64,"));
 
-    // A message without images stays a plain string, which is what the API expects.
     let plain = serde_json::to_value(Message::user("hello")).unwrap();
     assert!(plain["content"].is_string());
 }
@@ -720,7 +671,6 @@ fn every_tool_the_agent_is_offered_is_described() {
         .map(|d| {
             let f = &d["function"];
             assert_eq!(f["parameters"]["type"], "object");
-            // The description is the only thing telling the model when to reach for a tool, so an empty one is a real defect.
             assert!(f["description"].as_str().unwrap().len() > 20);
             f["name"].as_str().unwrap().to_string()
         })
@@ -745,8 +695,6 @@ fn every_tool_the_agent_is_offered_is_described() {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
 
-    // Dropped once the sandbox gained a shell: curl and date do these jobs, and
-    // every extra tool is another line in every prompt.
     for gone in [
         "http_request",
         "time_now",
@@ -758,8 +706,6 @@ fn every_tool_the_agent_is_offered_is_described() {
     }
 }
 
-// ── workspace ───────────────────────────────────────────────────────────────
-
 fn workspace(name: &str) -> merlin::workspace::Workspace {
     merlin::workspace::Workspace::new(scratch(name)).unwrap()
 }
@@ -769,7 +715,6 @@ fn an_edit_applies_only_when_every_replacement_is_unambiguous() {
     let w = workspace("ws-edit");
     w.write("a.txt", "alpha\nbeta\ngamma\nbeta\n").unwrap();
 
-    // "beta" appears twice, so the edit cannot know which was meant.
     let ambiguous = w.edit(
         "a.txt",
         &[merlin::workspace::Edit {
@@ -784,8 +729,6 @@ fn an_edit_applies_only_when_every_replacement_is_unambiguous() {
         "a refused edit must not have written anything"
     );
 
-    // A failing edit in a batch rolls the whole batch back, so the file never
-    // ends up half-edited.
     let partial = w.edit(
         "a.txt",
         &[
@@ -830,15 +773,12 @@ fn paths_cannot_climb_out_of_the_workspace() {
             "{attempt} should have been refused"
         );
     }
-    // A leading slash is treated as workspace-relative rather than as the host root.
     w.write("/inside.txt", "fine").unwrap();
     assert!(w.root().join("inside.txt").exists());
 }
 
 #[tokio::test]
 async fn the_run_limits_reach_the_sandbox_as_arguments() {
-    // sudo runs with env_reset, so limits passed through the environment never
-    // arrive. They have to travel on argv.
     use std::os::unix::fs::PermissionsExt;
 
     let script = scratch("exec-args").join("record");
@@ -861,8 +801,6 @@ async fn the_run_limits_reach_the_sandbox_as_arguments() {
 
 #[test]
 fn a_tool_call_is_logged_with_enough_to_identify_it() {
-    // The log recorded that a fetch happened but not what was fetched, which made
-    // "what did it read?" unanswerable after the fact.
     let line = merlin::agent::summarise(&serde_json::json!({
         "url": "https://example.com/thing",
         "limit": 8
@@ -873,7 +811,6 @@ fn a_tool_call_is_logged_with_enough_to_identify_it() {
     );
     assert!(line.contains("limit=8"), "got: {line}");
 
-    // A whole script would otherwise fill the journal, and newlines would break the line.
     let long = merlin::agent::summarise(&serde_json::json!({
         "script": format!("echo one\n{}", "x".repeat(4000))
     }));
@@ -887,9 +824,6 @@ fn a_tool_call_is_logged_with_enough_to_identify_it() {
         "a logged argument must stay on one line"
     );
 
-    // The cut has to leave a whole query behind. A turn once spent twenty rounds
-    // failing at SQL and the journal held only the first clause of each attempt,
-    // so there was nothing to re-run afterwards to see which one was wrong.
     let query = format!(
         "WITH RECURSIVE split(sender, w, rest) AS (SELECT sender, '', lower(body) || ' ' \
          FROM messages UNION ALL SELECT sender, substr(rest, 1, instr(rest, ' ') - 1), \
@@ -905,10 +839,6 @@ fn a_tool_call_is_logged_with_enough_to_identify_it() {
 
 #[test]
 fn choosing_fal_without_a_key_fails_at_startup() {
-    // Rather than at the moment someone asks for a picture, which is both later
-    // and harder to read as a configuration mistake.
-    // Matched rather than unwrap_err'd: that would need Debug on ImageGen, which
-    // holds two API keys and should not have a formatter that prints them.
     let err = match merlin::image::ImageGen::new(
         merlin::image::Provider::Fal,
         "fal-ai/z-image/turbo".into(),
@@ -921,7 +851,6 @@ fn choosing_fal_without_a_key_fails_at_startup() {
     };
     assert!(err.contains("FAL_API_KEY"), "got: {err}");
 
-    // OpenRouter is unaffected by a missing fal key.
     assert!(
         merlin::image::ImageGen::new(
             merlin::image::Provider::OpenRouter,

@@ -1,10 +1,3 @@
-//! Sandboxed shell execution.
-//!
-//! Runs as a distinct `merlin-exec` uid rather than the bot's own, for two reasons: that user cannot read `/var/lib/merlin` (the memory database,
-//! the cron store) or the EnvironmentFile holding every API key, and a separate uid is something the firewall can match on, which is how LAN egress gets denied while public internet stays reachable.
-//!
-//! The privilege step is `sudo -u merlin-exec <wrapper>`: sudo to an unprivileged user, restricted to a single binary.
-
 use anyhow::{Context, Result};
 use std::process::Stdio;
 use std::time::Duration;
@@ -12,14 +5,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 pub struct Sandbox {
-    /// Command prefix, e.g.
-    /// `["sudo", "-u", "merlin-exec", "/…/merlin-sandbox"]`.
-    /// Configurable so tests and local runs can execute directly.
     runner: Vec<String>,
     timeout: Duration,
     max_output: usize,
-    /// Passed to the wrapper as an address-space limit.
-    /// Enforcing it here would be advisory only, since the child is a different user.
     memory_max: String,
 }
 
@@ -42,7 +30,6 @@ impl Sandbox {
         }
     }
 
-    /// Run a shell script in the sandbox.
     pub async fn run(&self, source: &str) -> Result<Output> {
         let (program, args) = self
             .runner
@@ -62,7 +49,6 @@ impl Sandbox {
             .spawn()
             .with_context(|| format!("spawning sandbox via {program}"))?;
 
-        // Source arrives on stdin rather than as a temp file, so nothing the agent writes ever lands on a filesystem the bot user can see.
         if let Some(mut sink) = child.stdin.take() {
             sink.write_all(source.as_bytes()).await.ok();
             sink.shutdown().await.ok();
@@ -78,7 +64,6 @@ impl Sandbox {
                     timed_out: false,
                 })
             }
-            // kill_on_drop reaps the child; the wrapper also carries its own hard limit so a wedged process dies even if we are not around.
             Err(_) => Ok(Output {
                 stdout: String::new(),
                 stderr: format!(
@@ -92,8 +77,6 @@ impl Sandbox {
     }
 }
 
-/// Parse a size like `1G` or `512M` into kilobytes for `ulimit -v`.
-/// An unparseable value yields 0, which the wrapper reads as no limit rather than as a limit of nothing.
 fn address_space_kb(size: &str) -> u64 {
     let raw = size.trim();
     let (digits, scale) = match raw.chars().last() {

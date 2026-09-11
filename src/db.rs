@@ -1,17 +1,9 @@
-//! One database, opened once.
-//!
-//! Memories, messages and scheduled jobs were three files with three connections, three schemas and three locks, which meant three of everything to keep in step
-//! and no way to ask a question that spanned them.
-//! They are one file now, so a join is possible and the agent can be handed the schema and left to query it.
-
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
 
 use crate::embed;
 
-/// Every table, created on open.
-/// Written out in full rather than migrated in steps: the shape is small enough to state plainly, and `IF NOT EXISTS` makes applying it to an existing file a no-op.
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS memories (
   id         TEXT PRIMARY KEY,
@@ -79,8 +71,6 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
 );
 "#;
 
-/// What the agent is told it can query.
-/// Kept beside the schema so the two cannot drift.
 pub const SCHEMA_SUMMARY: &str = "\
 memories(id, key, content, category, room_id, created_at, updated_at)
 messages(event_id, room_id, sender, body, at)
@@ -100,10 +90,6 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Fold the three original files into this one, once.
-///
-/// Each is attached and copied rather than parsed, so the FTS and vector tables rebuild from their triggers and content tables rather than being copied in a half-consistent state.
-/// A migrated file is renamed aside rather than deleted, because the cost of keeping it is nothing and the cost of being wrong is everything.
 pub fn migrate_from_split_files(conn: &mut Connection, state_dir: &Path) -> Result<usize> {
     let sources = [
         (
@@ -152,10 +138,6 @@ pub fn migrate_from_split_files(conn: &mut Connection, state_dir: &Path) -> Resu
     Ok(moved)
 }
 
-/// Run a read-only query and render it as a text table.
-///
-/// Read-only is enforced by SQLite itself rather than by inspecting the text: `readonly()` is the parser's own verdict,
-/// where a prefix check would be fooled by a comment, a CTE wrapping a write, or a pragma with side effects.
 pub fn query(conn: &Connection, sql: &str, max_rows: usize) -> Result<String> {
     let stmt = conn
         .prepare(sql)

@@ -1,12 +1,3 @@
-//! Semantic search.
-//!
-//! Embeddings come from OpenRouter and live in sqlite-vec virtual tables beside the rows they describe.
-//! Cosine is the distance metric because it ignores magnitude, and Matryoshka truncation returns vectors that are not unit length.
-//!
-//! This is a second retrieval path rather than a component of the first.
-//! Keyword search answers "who said this exact thing" and semantic search answers "what was said about this", and their scores are never mixed:
-//! BM25 ranks by term statistics and cosine ranks by direction in embedding space, so a weighted sum of the two is a number with no meaning.
-
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -15,28 +6,18 @@ use std::time::Duration;
 
 const EMBED_URL: &str = "https://openrouter.ai/api/v1/embeddings";
 
-/// Inputs longer than this are cut before embedding.
-/// Long inputs cost more and dilute the vector, and the tail of a long message rarely changes what it is about.
 const MAX_INPUT_CHARS: usize = 4000;
 
-/// A table whose rows carry embeddings.
-///
-/// Everything below is written once against these four names rather than once per store, which is why memories and messages share an implementation instead of a shape.
 pub trait Embeddable {
-    /// Table holding the rows.
     const SOURCE: &'static str;
-    /// Column to embed.
     const TEXT: &'static str;
-    /// The vec0 table holding their vectors.
     const TABLE: &'static str;
-    /// Its primary key column.
     const KEY: &'static str;
 }
 
 pub struct Memories;
 impl Embeddable for Memories {
     const SOURCE: &'static str = "memories";
-    // Only the content. Keys are frequently opaque identifiers rather than descriptions, and feeding one into an embedding is noise.
     const TEXT: &'static str = "content";
     const TABLE: &'static str = "memory_vectors";
     const KEY: &'static str = "memory_rowid";
@@ -78,7 +59,6 @@ impl Embedder {
         self.dimensions
     }
 
-    /// Embed a batch, returning one vector per input in the same order.
     pub async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
@@ -113,7 +93,6 @@ impl Embedder {
             .and_then(Value::as_array)
             .context("embeddings response had no data array")?;
 
-        // The wire format carries an index per item and does not promise request order.
         let mut indexed: Vec<(usize, Vec<f32>)> = data
             .iter()
             .map(|item| {
@@ -147,7 +126,6 @@ impl Embedder {
     }
 }
 
-/// sqlite-vec is compiled in rather than loaded, and has to be registered before any connection is opened.
 pub fn register() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| unsafe {
@@ -164,10 +142,6 @@ pub fn register() {
     });
 }
 
-/// Create the vector table, dropping it first if it was built for a different model or width.
-///
-/// A vec0 table fixes its dimension at creation, so changing either setting leaves rows that can never be compared against a new query.
-/// Rebuilding is cheap: the backlog loop re-embeds whatever is missing.
 pub fn ensure_table<E: Embeddable>(
     conn: &Connection,
     model: &str,
@@ -211,10 +185,6 @@ pub fn ensure_table<E: Embeddable>(
     Ok(())
 }
 
-/// Rows with no vector yet, newest first, as (rowid, text to embed).
-///
-/// A LEFT JOIN against a vec0 table silently returns nothing, since the virtual table cannot be scanned as the right side of a join.
-/// NOT IN materialises the subquery instead, which is correct and fast enough at this size.
 pub fn pending<E: Embeddable>(conn: &Connection, limit: usize) -> Result<Vec<(i64, String)>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT rowid, {} FROM {} WHERE rowid NOT IN (SELECT {} FROM {})
@@ -258,7 +228,6 @@ pub fn save<E: Embeddable>(conn: &mut Connection, rows: &[(i64, Vec<f32>)]) -> R
     Ok(rows.len())
 }
 
-/// Drop one row's vector, so a rewritten row is re-embedded rather than found under its old meaning.
 pub fn invalidate<E: Embeddable>(conn: &Connection, rowid: i64) -> Result<()> {
     conn.execute(
         &format!("DELETE FROM {} WHERE {} = ?1", E::TABLE, E::KEY),
@@ -267,7 +236,6 @@ pub fn invalidate<E: Embeddable>(conn: &Connection, rowid: i64) -> Result<()> {
     Ok(())
 }
 
-/// The `k` nearest rowids, closest first.
 pub fn nearest<E: Embeddable>(conn: &Connection, query: &[f32], k: usize) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {} FROM {} WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance",
@@ -279,8 +247,6 @@ pub fn nearest<E: Embeddable>(conn: &Connection, query: &[f32], k: usize) -> Res
         .collect::<Result<Vec<_>, _>>()?)
 }
 
-/// Load rows by rowid, preserving the order given and skipping any that have gone.
-/// Vector search returns an order a SQL `IN` clause would discard, which is why these are fetched one at a time.
 pub fn load_ordered<T>(
     conn: &Connection,
     sql: &str,
@@ -297,8 +263,6 @@ pub fn load_ordered<T>(
     Ok(out)
 }
 
-/// Rank a candidate set by cosine against the query vector.
-/// Candidates with no vector yet fall in behind everything scored rather than disappearing, which keeps results sane mid-backfill.
 pub fn rank<E: Embeddable, T>(
     conn: &Connection,
     candidates: Vec<(i64, T)>,
@@ -332,8 +296,6 @@ pub fn rank<E: Embeddable, T>(
     Ok(out)
 }
 
-/// Cosine similarity, higher is closer.
-/// Magnitude is divided out, so truncated vectors of any length compare correctly.
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
     for (x, y) in a.iter().zip(b) {
@@ -347,7 +309,6 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     dot / (na.sqrt() * nb.sqrt())
 }
 
-/// sqlite-vec reads a float vector as raw little-endian f32.
 fn to_blob(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
@@ -360,10 +321,6 @@ fn from_blob(b: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// Embeds whatever is not embedded yet, forever.
-///
-/// One mechanism covers both the initial backfill and steady state, so there is no separate import path that can drift from the live one.
-/// Writes never block on the network: a new row is simply pending until this loop reaches it.
 pub async fn run(
     embedder: std::sync::Arc<Embedder>,
     db: std::sync::Arc<Mutex<Connection>>,
@@ -385,7 +342,6 @@ pub async fn run(
             }
         }
 
-        // Pause between batches while catching up, and sleep properly once there is nothing left.
         tokio::time::sleep(Duration::from_secs(if worked { 2 } else { 60 })).await;
     }
 }
@@ -395,7 +351,6 @@ async fn drain<E: Embeddable>(
     db: &Mutex<Connection>,
     batch: usize,
 ) -> Result<usize> {
-    // The lock is released before the request: holding it across an await would stall every tool for the duration of the call.
     let work = pending::<E>(&db.lock().unwrap(), batch)?;
     if work.is_empty() {
         return Ok(0);

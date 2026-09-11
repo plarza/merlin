@@ -1,8 +1,3 @@
-//! Configuration and secrets.
-//!
-//! The TOML file is world-readable and lives in the Nix store or the state directory; every credential comes from the environment instead,
-//! so nothing ever renders a resolved config containing secrets to disk.
-
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -13,17 +8,12 @@ pub struct Config {
     pub user_id: String,
     pub display_name: String,
 
-    /// Canonical room IDs (`!abc:server`).
-    /// Empty means no rooms, not all of them: an omitted allowlist must never be a grant.
     #[serde(default)]
     pub allowed_rooms: Vec<String>,
 
-    /// MXIDs permitted to trigger a turn.
-    /// Everyone else is still buffered as ambient context, they just cannot address the bot.
     #[serde(default)]
     pub allowed_senders: Vec<String>,
 
-    /// Ambient messages retained per room, in memory only.
     #[serde(default = "default_context_window")]
     pub context_window: usize,
 
@@ -39,7 +29,6 @@ pub struct Config {
     #[serde(default)]
     pub dreaming: Dreaming,
 
-    /// Where session, memory and cron state live.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
 }
@@ -50,18 +39,12 @@ pub struct ModelConfig {
     pub chat: String,
     #[serde(default = "default_image_model")]
     pub image: String,
-    /// Which service generates images. Chat and embeddings are OpenRouter either
-    /// way; this only moves image generation.
     #[serde(default = "default_image_provider")]
     pub image_provider: String,
-    /// How much of the token budget the model may spend thinking.
-    /// "low" keeps tool-heavy turns responsive; "default" leaves it to the provider.
     #[serde(default = "default_reasoning_effort")]
     pub reasoning_effort: String,
     #[serde(default = "default_embedding_model")]
     pub embedding: String,
-    /// Matryoshka truncation width.
-    /// 768 keeps the storage for a full archive around a tenth of a gigabyte while giving up very little retrieval quality against the native 3072.
     #[serde(default = "default_embedding_dimensions")]
     pub embedding_dimensions: usize,
 }
@@ -76,38 +59,29 @@ pub struct Limits {
     pub request_timeout_s: u64,
     #[serde(default = "default_exec_timeout_s")]
     pub exec_timeout_s: u64,
-    /// Wall-clock ceiling for one turn, checked between tool rounds.
     #[serde(default = "default_turn_timeout_s")]
     pub turn_timeout_s: u64,
     #[serde(default = "default_exec_memory_max")]
     pub exec_memory_max: String,
-    /// Rows sent to the embedding endpoint per request.
     #[serde(default = "default_embed_batch")]
     pub embed_batch: usize,
 }
 
-/// The nightly memory consolidation pass.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Dreaming {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// 5-field cron expression, in the configured timezone.
     #[serde(default = "default_dream_schedule")]
     pub schedule: String,
 }
 
-/// Credentials, read from the environment only.
 #[derive(Clone)]
 pub struct Secrets {
     pub matrix_password: String,
-    /// Recovery passphrase for server-side key backup.
-    /// Without it a wiped crypto store cannot restore room keys and old messages stay unreadable.
     pub matrix_recovery_passphrase: Option<String>,
-    /// Encrypts the persisted session blob at rest.
     pub session_encryption_key: String,
     pub openrouter_api_key: String,
     pub exa_api_key: Option<String>,
-    /// Only needed when image_provider is "fal".
     pub fal_api_key: Option<String>,
 }
 
@@ -127,8 +101,6 @@ impl Config {
         Ok(config)
     }
 
-    /// Identifiers can come from the environment instead of the file.
-    /// The config is rendered into the world-readable Nix store from a public repository, and a private room's id does not belong there even though it is not a credential.
     pub fn apply_env_overrides(&mut self) {
         if let Some(rooms) = list_from_env("MERLIN_ALLOWED_ROOMS") {
             self.allowed_rooms = rooms;
@@ -166,13 +138,10 @@ impl Secrets {
         Ok(Self {
             matrix_password: req("MATRIX_PASSWORD")?,
             matrix_recovery_passphrase: opt("MATRIX_RECOVERY_PASSPHRASE"),
-            // Derived from the Matrix password when unset so a fresh deploy works without inventing another secret to manage.
             session_encryption_key: opt("SESSION_ENCRYPTION_KEY")
                 .unwrap_or_else(|| req("MATRIX_PASSWORD").unwrap_or_default()),
             openrouter_api_key: req("OPENROUTER_API_KEY")?,
             exa_api_key: opt("EXA_API_KEY"),
-            // FAL_KEY is the name fal's own tooling uses, so accept it too rather
-            // than making this the one host where the documented variable is wrong.
             fal_api_key: opt("FAL_API_KEY").or_else(|| opt("FAL_KEY")),
         })
     }
@@ -191,7 +160,6 @@ fn req(key: &str) -> Result<String> {
         })
 }
 
-/// Comma-separated env list, empty entries dropped.
 fn list_from_env(key: &str) -> Option<Vec<String>> {
     let raw = std::env::var(key).ok()?;
     let items: Vec<String> = raw
@@ -209,7 +177,6 @@ fn opt(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// Serde needs a function per default, so they are generated from one list rather than written out one at a time.
 macro_rules! defaults {
     ($($name:ident -> $ty:ty = $value:expr;)*) => {
         $(fn $name() -> $ty { $value.into() })*
@@ -237,7 +204,6 @@ defaults! {
     default_state_dir          -> PathBuf = PathBuf::from("/var/lib/merlin");
 }
 
-/// Deserialised from nothing, so every default comes from the serde attributes above and the two can never drift apart.
 macro_rules! default_via_serde {
     ($($ty:ty),*) => {
         $(impl Default for $ty {

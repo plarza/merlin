@@ -1,15 +1,9 @@
-//! The turn loop: prompt, tool calls, reply.
-
 use anyhow::Result;
 use std::sync::Arc;
 
 use crate::llm::{Attachment, Llm, Message};
 use crate::tools::{Ctx, Outcome, Tools, definitions};
 
-/// How much of a tool call is kept in the journal, applied to the arguments and
-/// to the result alike. Generous enough to hold a whole query and the error it
-/// produced, because the point of the record is reconstructing a turn that went
-/// wrong, and a query cut off mid-clause cannot be run again to see what it did.
 const LOG_CHARS: usize = 512;
 
 pub struct Agent {
@@ -17,8 +11,6 @@ pub struct Agent {
     pub tools: Arc<Tools>,
     pub soul: String,
     pub max_iterations: usize,
-    /// Wall-clock ceiling for one turn.
-    /// The iteration count alone does not bound anything: sixty-four rounds each running code for five minutes is hours.
     pub max_duration: std::time::Duration,
     pub timezone: chrono_tz::Tz,
 }
@@ -27,15 +19,11 @@ pub struct Agent {
 pub struct TurnResult {
     pub text: String,
     pub images: Vec<Image>,
-    /// Tokens across every completion in the turn, for cost accounting.
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
-    /// Tool names in the order they ran, so a slow turn can be explained.
     pub tools_used: Vec<String>,
 }
 
-/// Where intermediate messages go while a turn is still running.
-/// Fed by the `send_message` tool, so the model chooses when an update is worth sending rather than having its narration forwarded whether it meant it or not.
 pub type Progress = tokio::sync::mpsc::UnboundedSender<String>;
 
 pub struct Image {
@@ -44,16 +32,12 @@ pub struct Image {
     pub caption: String,
 }
 
-/// Context for one inbound message.
 pub struct Incoming<'a> {
     pub room_id: &'a str,
     pub sender: &'a str,
     pub body: &'a str,
-    /// Ambient messages seen but not answered, oldest first.
     pub ambient: Option<String>,
-    /// Text of the message being replied to, when this is a reply, so a reply carrying only the bot's name still has its subject.
     pub reply_parent: Option<String>,
-    /// Images sent with the message, already downloaded and decrypted.
     pub attachments: Vec<Attachment>,
 }
 
@@ -85,8 +69,6 @@ impl Agent {
         let deadline = std::time::Instant::now() + self.max_duration;
 
         for round in 0..self.max_iterations {
-            // Checked between rounds rather than enforced with a timeout around the whole turn,
-            // so an overrunning turn still answers with what it has instead of being cut off mid-tool.
             if std::time::Instant::now() >= deadline {
                 tracing::warn!(round, "turn exceeded its time budget");
                 break;
@@ -108,7 +90,6 @@ impl Agent {
                 "model requested tools"
             );
 
-            // Echo the assistant's tool-call message back before the results, or the next request is malformed.
             messages.push(reply.clone());
 
             for call in &reply.tool_calls {
@@ -144,9 +125,6 @@ impl Agent {
             }
         }
 
-        // Out of steps or out of time.
-        // Rather than reporting the limit, which tells the user nothing, ask for an answer from what was already gathered.
-        // Tools are withheld from this call so the model cannot spend another round.
         messages.push(Message::user(
             "You have used all the time or tool steps available. Answer now with \
              what you have already found, and say plainly which parts you could \
@@ -167,10 +145,6 @@ impl Agent {
     }
 }
 
-/// One-line summary of a tool call's arguments, for the log.
-///
-/// Without this a log line says a URL was fetched but not which one, which makes it impossible to answer afterwards what the agent actually read.
-/// Values are truncated, but with enough room to re-run what was recorded: a query cut off mid-clause cannot be tested against the database afterwards.
 pub fn summarise(args: &serde_json::Value) -> String {
     let Some(object) = args.as_object() else {
         return String::new();
@@ -189,14 +163,10 @@ pub fn summarise(args: &serde_json::Value) -> String {
         .join(" ")
 }
 
-/// Collapse a value onto one line for the journal, since a multi-line query or
-/// result would otherwise break the record into fragments that cannot be grepped.
 fn flatten(text: &str, max: usize) -> String {
     crate::truncate(&text.split_whitespace().collect::<Vec<_>>().join(" "), max)
 }
 
-/// Assemble the system prompt.
-/// Free-standing so it can be tested without constructing an LLM client or a tool registry.
 fn system_prompt(soul: &str, incoming: &Incoming<'_>, now: &str) -> String {
     let mut prompt = soul.to_string();
 

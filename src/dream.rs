@@ -1,11 +1,3 @@
-//! Dreaming: a nightly pass where the agent consolidates its own memory.
-//!
-//! Memory accumulates by appending. `memory_store` upserts on `key`, but only when the agent reuses a key,
-//! and in practice almost every key is distinct, so near-duplicates pile up and nothing ever revises them.
-//!
-//! This runs as an ordinary turn with the ordinary tools, so consolidation is the agent's own judgement rather than a similarity threshold chosen here.
-//! It posts nothing: a room does not want a report at five in the morning, and the result is visible in the memory itself.
-
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -33,8 +25,6 @@ same subject again revises the entry instead of adding another
 Be conservative. Forget something only when its content is genuinely captured \
 elsewhere or genuinely worthless.";
 
-/// Run one consolidation pass.
-/// `room_id` is where any job it creates would fire, not a filter: memory is pooled across rooms and this reviews all of it.
 pub async fn run(agent: &Agent, room_id: &str) -> Result<()> {
     let started = std::time::Instant::now();
 
@@ -48,7 +38,6 @@ pub async fn run(agent: &Agent, room_id: &str) -> Result<()> {
                 reply_parent: None,
                 attachments: Vec::new(),
             },
-            // No progress sink: an intermediate message would post to the room, which is the one thing this must not do.
             None,
         )
         .await?;
@@ -63,8 +52,6 @@ pub async fn run(agent: &Agent, room_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Schedule the nightly pass.
-/// Registered here rather than written into the cron table, so it cannot be deleted by accident and needs no migration to appear.
 pub async fn schedule(
     scheduler: &tokio_cron_scheduler::JobScheduler,
     agent: Arc<Agent>,

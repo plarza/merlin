@@ -1,7 +1,3 @@
-//! Scheduled jobs, created by the agent at runtime rather than written into config.
-//!
-//! A firing job has one output path: the scheduler runs the prompt and posts the result.
-
 use anyhow::Result;
 use rusqlite::{Connection, params};
 use std::str::FromStr;
@@ -70,13 +66,11 @@ pub fn record_run(conn: &Connection, name: &str, status: &str) -> Result<()> {
 }
 
 impl Job {
-    /// Reject a bad expression at creation time, where the agent can correct it, rather than at the next restart.
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(!self.name.trim().is_empty(), "job name cannot be empty");
         chrono_tz::Tz::from_str(&self.timezone)
             .map_err(|_| anyhow::anyhow!("unknown timezone '{}'", self.timezone))?;
 
-        // tokio-cron-scheduler wants 6 fields (seconds first); the agent writes ordinary 5-field crontab syntax, so normalising here keeps the tool surface familiar.
         tokio_cron_scheduler::Job::new_async_tz(
             self.six_field_schedule().as_str(),
             chrono_tz::UTC,

@@ -1,14 +1,9 @@
-//! Durable memory.
-//!
-//! Flat by design: no agent or tenant foreign key, so renaming the bot does not orphan its records.
-
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::embed::{self, Memories};
 use crate::query::{Term, loose_text, parse, required_expr};
 
-/// How many required-term matches are pulled before ranking them by meaning.
 const CANDIDATE_CAP: usize = 500;
 
 #[derive(Debug, Clone)]
@@ -19,7 +14,6 @@ pub struct Record {
     pub created_at: String,
 }
 
-/// Upsert by `key` so re-filing the same subject revises it rather than accumulating near-duplicates.
 pub fn store(
     conn: &Connection,
     key: &str,
@@ -45,7 +39,6 @@ pub fn store(
         ],
     )?;
 
-    // A revised entry keeps its rowid, so its vector would otherwise survive as a description of the old text.
     if let Some(rowid) = rowid(conn, key)? {
         embed::invalidate::<Memories>(conn, rowid).ok();
     }
@@ -53,19 +46,12 @@ pub fn store(
 }
 
 pub fn forget(conn: &Connection, key: &str) -> Result<bool> {
-    // Delete the vector first, while the rowid is still resolvable.
-    // SQLite reuses freed rowids, so an orphaned vector would eventually answer for whichever memory lands on that rowid next.
     if let Some(rowid) = rowid(conn, key)? {
         embed::invalidate::<Memories>(conn, rowid).ok();
     }
     Ok(conn.execute("DELETE FROM memories WHERE key = ?1", params![key])? > 0)
 }
 
-/// Search with the shared query syntax.
-/// Quoted terms must appear exactly and select the candidate set; the unquoted remainder ranks that set by meaning.
-///
-/// The caller supplies the embedding of the unquoted text, since embedding is a network call and this runs under a lock.
-/// Without a vector, or before the backlog loop has reached these rows, this falls back to keyword matching.
 pub fn recall(
     conn: &Connection,
     query: &str,
@@ -75,7 +61,6 @@ pub fn recall(
     let terms = parse(query);
     let exact: Vec<&Term> = terms.iter().filter(|t| t.exact).collect();
 
-    // Every term was quoted, so the requirements are the whole query.
     if !exact.is_empty() && loose_text(query).is_empty() {
         let hits = required(conn, &exact, limit)?;
         if !hits.is_empty() {
@@ -101,7 +86,6 @@ pub fn recall(
 const SELECT_BY_ROWID: &str =
     "SELECT key, content, category, created_at FROM memories WHERE rowid = ?1";
 
-/// Memories containing every quoted term, in BM25 order.
 fn required(conn: &Connection, exact: &[&Term], limit: usize) -> Result<Vec<(i64, Record)>> {
     let mut stmt = conn.prepare(
         "SELECT m.rowid, m.key, m.content, m.category, m.created_at
@@ -123,10 +107,7 @@ fn required(conn: &Connection, exact: &[&Term], limit: usize) -> Result<Vec<(i64
         .collect::<Result<Vec<_>, _>>()?)
 }
 
-/// The fallback when no embedding is available.
-/// Drops to a LIKE scan when the query has no usable FTS tokens, so a search for punctuation or a bare id still works.
 fn keyword(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Record>> {
-    // FTS5 treats most punctuation as syntax, so a raw query can be a syntax error rather than a miss.
     let cleaned = query
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| t.len() > 1)

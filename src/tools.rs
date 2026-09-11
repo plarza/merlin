@@ -1,8 +1,3 @@
-//! Tool definitions and dispatch.
-//!
-//! Every tool here exists because it was asked for in conversation.
-//! There is no approval gate: the sender allowlist is the boundary.
-
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -29,15 +24,11 @@ pub struct Tools {
     pub config: Arc<Config>,
 }
 
-/// Everything a tool needs to know about the turn it is running in.
 pub struct Ctx<'a> {
     pub room_id: &'a str,
-    /// Where an intermediate message goes, when the turn has somewhere to send one.
     pub progress: Option<&'a Progress>,
 }
 
-/// What a tool produced.
-/// Images travel separately so the Matrix layer can upload bytes rather than stuffing base64 through the model context.
 pub enum Outcome {
     Text(String),
     Image {
@@ -48,8 +39,6 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// What the model sees.
-    /// For an image that is a short acknowledgement; the bytes go to Matrix directly.
     pub fn for_model(&self) -> String {
         match self {
             Outcome::Text(t) => t.clone(),
@@ -243,13 +232,10 @@ impl Tools {
     pub async fn dispatch(&self, name: &str, args: &Value, ctx: &Ctx<'_>) -> Outcome {
         match self.run(name, args, ctx).await {
             Ok(outcome) => outcome,
-            // Tool failures are information for the model, not turn-ending errors: it should be able to try something else or say what broke.
             Err(e) => Outcome::Text(format!("Error from {name}: {e}")),
         }
     }
 
-    /// Dispatch spine.
-    /// Each arm names the tool and nothing else; the work lives in a method per tool, so this stays a table of contents.
     async fn run(&self, name: &str, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
         match name {
             "memory_recall" => self.memory_recall(args).await,
@@ -501,10 +487,6 @@ impl Tools {
         ))
     }
 
-    /// Embed the unquoted part of a query, which is what ranking by meaning uses.
-    ///
-    /// Returns None when everything was quoted, so a purely exact search costs no round trip.
-    /// A failure here is also None rather than an error: search then falls back to keyword matching, which is far better than failing the tool.
     async fn embed_loose(&self, query: &str) -> Option<Vec<f32>> {
         let text = crate::query::loose_text(query);
         if text.is_empty() {
@@ -519,8 +501,6 @@ impl Tools {
         }
     }
 
-    /// Shared HTTP path for web_fetch and http_request.
-    /// Errors above the byte cap rather than truncating, so a partial body is never mistaken for a whole one.
     async fn fetch_capped(
         &self,
         method: reqwest::Method,
@@ -587,7 +567,6 @@ fn render_messages(hits: &[messages::Archived]) -> String {
         .join("\n")
 }
 
-/// A caller-supplied row limit, defaulted and clamped.
 fn limit(args: &Value, default: u64, max: u64) -> usize {
     args.get("limit")
         .and_then(Value::as_u64)

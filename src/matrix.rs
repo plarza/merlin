@@ -1,8 +1,3 @@
-//! Matrix wiring.
-//!
-//! mxlink owns login, session persistence, key backup and cross-signing.
-//! What is left here is deciding which messages deserve a turn, and sending replies as plain text.
-
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,23 +17,15 @@ use crate::config::{Config, Secrets};
 use crate::llm::Attachment;
 use crate::room::{Buffers, Turn, is_addressed};
 
-/// A typing notice carries a four second timeout, so one sent at the start of a turn stops showing long before the work is done. Refreshed just inside that window, which is also the shortest interval the SDK will send on.
 const TYPING_REFRESH: Duration = Duration::from_secs(3);
 
-/// A file that arrived with a message.
 struct Attached {
     source: mxlink::matrix_sdk::ruma::events::room::MediaSource,
     name: String,
     media_type: Option<String>,
-    /// Whether the model can look at it, which in practice means an image.
     viewable: bool,
 }
 
-/// The body to record, and the file to fetch if a turn runs.
-///
-/// Every attachment takes the same path, because an image is a file too: all of them land in the workspace,
-/// and an image is additionally handed to the model, which is the one thing it can do with bytes directly.
-/// `None` means a message type the bot does not handle at all.
 fn extract(msgtype: &MessageType) -> Option<(String, Option<Attached>)> {
     let file = |name: &str, source, media_type, viewable| {
         let name = name.trim().to_string();
@@ -55,7 +42,6 @@ fn extract(msgtype: &MessageType) -> Option<(String, Option<Attached>)> {
 
     match msgtype {
         MessageType::Text(m) => Some((m.body.trim().to_string(), None)),
-        // Only an image carries its media type onward, since only an image is sent as bytes.
         MessageType::Image(m) => file(
             &m.body,
             m.source.clone(),
@@ -88,7 +74,6 @@ pub async fn connect(config: &Config, secrets: &Secrets) -> Result<MatrixLink> {
         secrets.matrix_password.clone(),
     );
 
-    // Without a recovery passphrase a wiped crypto store cannot restore room keys, and previously readable messages become permanently undecryptable.
     let encryption = LoginEncryption::new(secrets.matrix_recovery_passphrase.clone(), false);
 
     let login = LoginConfig::new(
@@ -98,7 +83,6 @@ pub async fn connect(config: &Config, secrets: &Secrets) -> Result<MatrixLink> {
         config.display_name.clone(),
     );
 
-    // mxlink wants exactly 32 bytes; derive them from the configured key material so no separate 64-hex secret has to be provisioned and rotated.
     let key = {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -173,8 +157,6 @@ impl Bot {
         .await
     }
 
-    /// Buffer and archive every message, whether or not it was addressed to the bot.
-    /// Ambient context is the point: addressing decides only whether a turn runs.
     fn remember(
         &self,
         event: &OriginalSyncRoomMessageEvent,
@@ -199,7 +181,6 @@ impl Bot {
         }
     }
 
-    /// Whether this message should start a turn.
     fn should_answer(
         &self,
         event: &OriginalSyncRoomMessageEvent,
@@ -228,8 +209,6 @@ impl Bot {
             return false;
         }
 
-        // Addressed, but by someone who may not drive the bot.
-        // Their message still counts as context, they just cannot start a turn.
         if !self.config.is_allowed_sender(sender) {
             tracing::info!(%sender, "addressed by a sender who is not allowed");
             return false;
@@ -237,7 +216,6 @@ impl Bot {
         true
     }
 
-    /// Run one turn and report the result to the room.
     async fn answer(
         self: &Arc<Self>,
         room: Room,
@@ -247,13 +225,11 @@ impl Bot {
         attached: Option<Attached>,
         reply_parent: Option<String>,
     ) -> Result<()> {
-        // The buffer already contains this message; the turn passes it separately, so drop the last entry from the ambient block.
         let ambient = self.buffers.render(&room_id, true);
 
         tracing::info!(%sender, chars = body.len(), "turn started");
         let started = std::time::Instant::now();
 
-        // Fetched only for a turn that will actually run, so an attachment nobody asked about costs nothing.
         let mut body = body;
         let attachments = match attached {
             Some(file) => self.receive(&room, file, &mut body).await,
@@ -272,8 +248,6 @@ impl Bot {
             })
         };
 
-        // Intermediate messages are posted as they arrive rather than collected,
-        // so a long task reads as progress instead of a minute of silence.
         let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel::<String>();
         let pump = {
             let bot = Arc::clone(self);
@@ -302,10 +276,8 @@ impl Bot {
             )
             .await;
 
-        // Closing the channel and waiting for the pump guarantees every update has landed before the final answer follows it.
         drop(progress);
         let _ = pump.await;
-        // Stopped before the notice is cleared, so a refresh cannot land after it and leave the indicator stuck on.
         typing.abort();
         let _ = room.typing_notice(false).await;
 
@@ -342,8 +314,6 @@ impl Bot {
         Ok(())
     }
 
-    /// Resolve a room by id and send plain text.
-    /// Used by scheduled jobs, which have a room id rather than a live Room handle.
     pub async fn post(&self, room_id: &str, text: &str) -> Result<()> {
         let room = self.resolve_room(room_id)?;
         self.send_text(&room, text).await
@@ -363,11 +333,6 @@ impl Bot {
             .with_context(|| format!("not joined to room {room_id}"))
     }
 
-    /// Download an attachment once, keep it in the workspace, and hand back
-    /// anything the model can look at directly.
-    ///
-    /// The saved path is appended to the message body, so the agent knows the file is there and can open it with the shell if it decides the contents matter.
-    /// Nothing is parsed here: a PDF costs nothing until it is read.
     async fn receive(&self, room: &Room, file: Attached, body: &mut String) -> Vec<Attachment> {
         let request = MediaRequestParameters {
             source: file.source,
@@ -410,7 +375,6 @@ impl Bot {
         }]
     }
 
-    /// Sender and body of the message being replied to, when there is one.
     async fn reply_parent(
         &self,
         room: &Room,
@@ -437,7 +401,6 @@ impl Bot {
         Some((sender, body))
     }
 
-    /// Plain text with no formatted_body, so nothing renders as markdown.
     async fn send_text(&self, room: &Room, text: &str) -> Result<()> {
         let mut content = RoomMessageEventContent::text_plain(text);
         self.link

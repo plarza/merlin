@@ -1,7 +1,3 @@
-//! Scheduled jobs.
-//!
-//! A firing job has one output path: run the prompt as a turn, post the result to its room.
-
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -11,10 +7,6 @@ use crate::agent::{Agent, Incoming};
 use crate::cron::{self, Job};
 use crate::matrix::Bot;
 
-/// Start the scheduler and keep it in step with the store.
-///
-/// Jobs the agent creates through `cron_create` land in SQLite, not in this process, so a reconcile loop picks them up.
-/// Without it a new job would only fire after a restart, which is not what "schedule this" should mean.
 pub async fn start(
     db: Arc<Mutex<rusqlite::Connection>>,
     agent: Arc<Agent>,
@@ -26,13 +18,6 @@ pub async fn start(
         .context("creating job scheduler")?;
     scheduler.start().await.context("starting scheduler")?;
 
-    // Registered directly rather than stored in the cron table, so it cannot be
-    // deleted by accident and appears without a migration.
-    //
-    // Memory is pooled across every allowed room, so dreaming runs once rather
-    // than per room. It still needs one room as its home, because a turn belongs
-    // to a room and any job it creates has to fire somewhere; the first allowed
-    // room is that home.
     if config.dreaming.enabled
         && let Some(room_id) = config.allowed_rooms.first()
     {
@@ -52,8 +37,6 @@ pub async fn start(
     }
 
     tokio::spawn(async move {
-        // name -> (uuid, fingerprint).
-        // The fingerprint catches an edited job, which must be removed and re-added rather than left on its old cron.
         let mut live: HashMap<String, (uuid::Uuid, String)> = HashMap::new();
 
         loop {
@@ -68,7 +51,6 @@ pub async fn start(
                 .map(|j| (j.name.clone(), j))
                 .collect();
 
-            // Drop jobs that were deleted or changed.
             let stale: Vec<String> = live
                 .iter()
                 .filter(|(name, (_, fp))| {
@@ -102,10 +84,8 @@ pub async fn start(
                         tracing::info!(%name, schedule = %job.schedule, "scheduled");
                         live.insert(name.clone(), (uuid, fingerprint(job)));
                     }
-                    // One bad expression must not stop the others from loading.
                     Err(e) => {
                         tracing::warn!(%name, error = %e, "skipping unschedulable job");
-                        // Remember it as broken so the warning is not repeated every minute.
                         live.insert(name.clone(), (uuid::Uuid::nil(), fingerprint(job)));
                     }
                 }
@@ -182,7 +162,6 @@ async fn run_once(job: &Job, agent: &Agent, bot: &Arc<Bot>) -> Result<()> {
         .turn(
             Incoming {
                 room_id: &job.room_id,
-                // Marked as the scheduler rather than a person, so the model does not address the reply to whoever last spoke.
                 sender: "scheduler",
                 body: &job.prompt,
                 ambient: None,

@@ -1,10 +1,3 @@
-//! Image generation.
-//!
-//! Two providers behind one call, because they disagree about more than the URL.
-//! OpenRouter answers with the image inline as base64; fal answers with a link to
-//! it, so the bytes take a second request that the caller should not have to know
-//! about. Chat and embeddings stay on OpenRouter regardless of what is set here.
-
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -13,8 +6,6 @@ use std::time::Duration;
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/images";
 const FAL_URL: &str = "https://fal.run";
 
-/// Where images are generated. Named in config rather than inferred from the
-/// model id, since a provider prefix is a naming convention and not a promise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
@@ -44,8 +35,6 @@ pub struct ImageGen {
     provider: Provider,
     model: String,
     openrouter_key: String,
-    /// Absent unless fal is configured, so the missing key is reported as
-    /// configuration rather than as an authentication failure from fal.
     fal_key: Option<String>,
 }
 
@@ -81,8 +70,6 @@ impl ImageGen {
         &self.model
     }
 
-    /// Generate one image. `model` overrides the configured one for this call,
-    /// but not the provider: an override is a model on whichever provider is set.
     pub async fn generate(&self, prompt: &str, model: Option<&str>) -> Result<GeneratedImage> {
         let model = model.unwrap_or(&self.model);
         match self.provider {
@@ -128,8 +115,6 @@ impl ImageGen {
             .context("image provider is 'fal' but FAL_API_KEY is not set")?;
         let url = fal_endpoint(model);
 
-        // num_images rather than the default, so a model that would happily
-        // return four does not cost four generations for one message.
         let payload = self
             .post(
                 &url,
@@ -152,9 +137,6 @@ impl ImageGen {
             .unwrap_or("image/png")
             .to_string();
 
-        // fal hands back a link rather than the image, so the bytes are a second
-        // request. The link is public and pre-signed; sending the key to it would
-        // be leaking it to whatever host fal chose.
         let bytes = self
             .http
             .get(link)
@@ -171,8 +153,6 @@ impl ImageGen {
         Ok(GeneratedImage { bytes, media_type })
     }
 
-    /// POST JSON and parse the reply, reporting the provider's own error text.
-    /// Shared because the failure modes are identical even though the auth is not.
     async fn post(
         &self,
         url: &str,
@@ -209,9 +189,6 @@ fn fal_endpoint(model: &str) -> String {
     format!("{FAL_URL}/{}", model.trim_matches('/'))
 }
 
-/// Pull the human-readable part out of an error body.
-/// The two providers nest it differently, and fal's validation errors arrive as a
-/// list of field complaints rather than a sentence.
 fn error_text(payload: &Value) -> String {
     if let Some(message) = payload
         .pointer("/error/message")

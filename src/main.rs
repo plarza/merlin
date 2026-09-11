@@ -1,5 +1,3 @@
-//! merlin — a Matrix assistant.
-
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -38,7 +36,6 @@ async fn main() -> Result<()> {
     let link = matrix::connect(&config, &secrets).await?;
     tracing::info!(user = %config.user_id, "connected");
 
-    // The remaining one-shot modes need a session but not a running bot.
     if let Some(path) = &args.import_keys {
         return import_keys(&link, path).await;
     }
@@ -49,7 +46,6 @@ async fn main() -> Result<()> {
     runtime.run(link, config).await
 }
 
-/// Command line, parsed once.
 #[derive(Default)]
 struct Args {
     config: PathBuf,
@@ -86,7 +82,6 @@ impl Args {
     }
 }
 
-/// Everything built once at startup and shared for the life of the process.
 struct Runtime {
     db: Arc<Mutex<Connection>>,
     agent: Arc<Agent>,
@@ -136,8 +131,6 @@ impl Runtime {
             );
         }
 
-        // Deliberately outside the 0700 state directory: the sandbox uid shares
-        // this directory and must not gain a foothold beside the database.
         let workspace = Arc::new(Workspace::new(workspace_dir())?);
         tracing::info!(path = %workspace.root().display(), "workspace ready");
 
@@ -192,7 +185,6 @@ impl Runtime {
             config: Arc::clone(&config),
         });
 
-        // Started before sync so a job due at boot is not missed.
         scheduler::start(self.db, self.agent, Arc::clone(&bot), config).await?;
         bot.run().await
     }
@@ -212,7 +204,6 @@ fn open_database(path: &Path, state_dir: &Path) -> Result<Arc<Mutex<Connection>>
     Ok(Arc::new(Mutex::new(conn)))
 }
 
-/// Refill the ambient buffer from the archive, so a restart does not leave the bot blind to what was just said.
 fn seed_buffers(db: &Mutex<Connection>, config: &Config) -> Arc<Buffers> {
     let buffers = Arc::new(Buffers::new(config.context_window));
     let conn = db.lock().unwrap();
@@ -267,7 +258,6 @@ async fn backfill_history(
     db: &Mutex<Connection>,
     pages: usize,
 ) -> Result<()> {
-    // Sync once so the client has joined rooms and whatever keys the server will hand over before we start reading history.
     tokio::time::sleep(Duration::from_secs(5)).await;
     let stats = backfill::run(link, config, db, pages).await?;
     println!("backfill: {stats}");
@@ -282,8 +272,6 @@ async fn backfill_history(
     Ok(())
 }
 
-/// Where the agent's files live.
-/// Shared with the sandbox uid, so it sits beside the state directory rather than inside it.
 fn workspace_dir() -> PathBuf {
     match std::env::var("MERLIN_WORKSPACE") {
         Ok(v) if !v.trim().is_empty() => PathBuf::from(v),
@@ -291,8 +279,6 @@ fn workspace_dir() -> PathBuf {
     }
 }
 
-/// How `run_code` reaches the sandbox.
-/// Overridable so the bot can run outside NixOS, where the production wrapper does not exist.
 fn exec_runner() -> Vec<String> {
     match std::env::var("MERLIN_EXEC_RUNNER") {
         Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(str::to_string).collect(),

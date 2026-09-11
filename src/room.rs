@@ -1,12 +1,6 @@
-//! Addressing rules and the ambient context buffer.
-//!
-//! Pure logic, deliberately separate from the Matrix plumbing so it can be tested without a homeserver — this is the part that decides whether a message costs money.
-
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// One buffered message.
-/// Never persisted: the ring dies with the process, so ambient conversation does not silently become permanently searchable.
 #[derive(Debug, Clone)]
 pub struct Turn {
     pub sender: String,
@@ -36,7 +30,6 @@ impl Buffers {
         }
     }
 
-    /// Everything buffered for a room, oldest first, excluding the message currently being answered (which the caller passes separately).
     pub fn context(&self, room_id: &str) -> Vec<Turn> {
         self.inner
             .lock()
@@ -46,8 +39,6 @@ impl Buffers {
             .unwrap_or_default()
     }
 
-    /// Ambient context as prompt text.
-    /// `skip_last` drops the message currently being answered, which the caller passes to the model separately.
     pub fn render(&self, room_id: &str, skip_last: bool) -> Option<String> {
         let mut turns = self.context(room_id);
         if skip_last {
@@ -66,9 +57,6 @@ impl Buffers {
     }
 }
 
-/// Whether a message is addressed to the bot.
-///
-/// The name check is word-boundary, so an unrelated use of the name in ordinary conversation does not trigger a turn.
 pub fn is_addressed(
     body: &str,
     m_mentions: &[String],
@@ -81,7 +69,6 @@ pub fn is_addressed(
         return true;
     }
 
-    // An explicit pill is authoritative in both directions: a client that sent m.mentions listed everyone it meant.
     if !m_mentions.is_empty() {
         return m_mentions.iter().any(|id| id == user_id);
     }
@@ -95,8 +82,6 @@ pub fn is_addressed(
         || (!display_name.is_empty() && contains_word(&haystack, &display_name.to_lowercase()))
 }
 
-/// Word-boundary containment without pulling a regex per call.
-/// A match must not be flanked by alphanumerics, so "merlin" hits in "merlin, hello" and "@merlin" but not in "merlinesque".
 fn contains_word(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
