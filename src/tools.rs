@@ -249,245 +249,260 @@ impl Tools {
         }
     }
 
+    /// Dispatch spine.
+    /// Each arm names the tool and nothing else; the work lives in a method per tool, so this stays a table of contents.
     async fn run(&self, name: &str, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
         match name {
-            "memory_recall" => {
-                let query = str_arg(args, "query")?;
-                let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
-                let vector = self.embed_loose(&query).await;
-                let hits = memory::recall(
-                    &self.db.lock().unwrap(),
-                    &query,
-                    vector.as_deref(),
-                    limit.clamp(1, 25),
-                )?;
-                if hits.is_empty() {
-                    return Ok(Outcome::Text(format!("No memories matched '{query}'.")));
-                }
-                Ok(Outcome::Text(render_memories(&hits)))
-            }
-
-            "memory_store" => {
-                let key = str_arg(args, "key")?;
-                let content = str_arg(args, "content")?;
-                let category = args
-                    .get("category")
-                    .and_then(Value::as_str)
-                    .unwrap_or("core");
-                memory::store(
-                    &self.db.lock().unwrap(),
-                    &key,
-                    &content,
-                    category,
-                    Some(ctx.room_id),
-                )?;
-                Ok(Outcome::Text(format!("Stored under '{key}'.")))
-            }
-
-            "memory_forget" => {
-                let key = str_arg(args, "key")?;
-                let gone = memory::forget(&self.db.lock().unwrap(), &key)?;
-                Ok(Outcome::Text(if gone {
-                    format!("Deleted '{key}'.")
-                } else {
-                    format!("No memory under '{key}'.")
-                }))
-            }
-
-            "search_messages" => {
-                let query = str_arg(args, "query")?;
-                let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
-                let vector = self.embed_loose(&query).await;
-                let hits = messages::search(
-                    &self.db.lock().unwrap(),
-                    &query,
-                    vector.as_deref(),
-                    limit.clamp(1, 30),
-                )?;
-                if hits.is_empty() {
-                    return Ok(Outcome::Text(format!("No messages matched '{query}'.")));
-                }
-                Ok(Outcome::Text(render_messages(&hits)))
-            }
-
-            "send_message" => {
-                let text = str_arg(args, "text")?;
-                match ctx.progress {
-                    Some(sink) => {
-                        let _ = sink.send(text);
-                        Ok(Outcome::Text("Sent to the room.".into()))
-                    }
-                    None => Ok(Outcome::Text(
-                        "There is no room to send to from here.".into(),
-                    )),
-                }
-            }
-
-            "web_search" => {
-                let query = str_arg(args, "query")?;
-                let n = args
-                    .get("num_results")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(5)
-                    .clamp(1, 10);
-                let key = self
-                    .exa_key
-                    .as_ref()
-                    .context("web search is unavailable: EXA_API_KEY is not set")?;
-
-                let resp = self
-                    .http
-                    .post("https://api.exa.ai/search")
-                    .header("x-api-key", key)
-                    .json(&json!({
-                        "query": query,
-                        "numResults": n,
-                        "contents": { "text": { "maxCharacters": 1200 } }
-                    }))
-                    .send()
-                    .await
-                    .context("calling Exa")?;
-
-                let payload: Value = resp.json().await.context("decoding Exa response")?;
-                let results = payload
-                    .get("results")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-
-                if results.is_empty() {
-                    return Ok(Outcome::Text(format!("No results for '{query}'.")));
-                }
-
-                let body = results
-                    .iter()
-                    .map(|r| {
-                        let title = r
-                            .get("title")
-                            .and_then(Value::as_str)
-                            .unwrap_or("(untitled)");
-                        let url = r.get("url").and_then(Value::as_str).unwrap_or("");
-                        let text = r.get("text").and_then(Value::as_str).unwrap_or("");
-                        format!("{title}\n{url}\n{}", truncate(text, 900))
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n\n---\n\n");
-                Ok(Outcome::Text(body))
-            }
-
-            "web_fetch" => {
-                let url = str_arg(args, "url")?;
-                let body = self
-                    .fetch_capped(reqwest::Method::GET, &url, None, None)
-                    .await?;
-                let text =
-                    html2text::from_read(body.as_bytes(), 100).unwrap_or_else(|_| body.clone());
-                Ok(Outcome::Text(truncate(&text, 12_000)))
-            }
-
-            "generate_image" => {
-                let prompt = str_arg(args, "prompt")?;
-                let model = args.get("model").and_then(Value::as_str);
-                let image = self.llm.image(&prompt, model).await?;
-                Ok(Outcome::Image {
-                    bytes: image.bytes,
-                    media_type: image.media_type,
-                    caption: prompt,
-                })
-            }
-
-            "run_code" => {
-                let language = str_arg(args, "language")?;
-                let source = str_arg(args, "source")?;
-                let out = self.sandbox.run(&language, &source, None).await?;
-                let mut report = String::new();
-                if !out.stdout.is_empty() {
-                    report.push_str(&out.stdout);
-                }
-                if !out.stderr.is_empty() {
-                    report.push_str(&format!("\n[stderr]\n{}", out.stderr));
-                }
-                if out.timed_out {
-                    report.push_str("\n[timed out]");
-                } else if out.exit_code.unwrap_or(0) != 0 {
-                    report.push_str(&format!("\n[exit {}]", out.exit_code.unwrap_or(-1)));
-                }
-                if report.trim().is_empty() {
-                    report.push_str("(no output)");
-                }
-                Ok(Outcome::Text(report))
-            }
-
-            "write_file" => {
-                let path = str_arg(args, "path")?;
-                let content = str_arg(args, "content")?;
-                Ok(Outcome::Text(self.workspace.write(&path, &content)?))
-            }
-
-            "edit_file" => {
-                let path = str_arg(args, "path")?;
-                let edits = args
-                    .get("edits")
-                    .and_then(Value::as_array)
-                    .context("missing required argument 'edits'")?
-                    .iter()
-                    .map(|e| {
-                        Ok(Edit {
-                            old: str_arg(e, "old_text")?,
-                            new: str_arg(e, "new_text")?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(Outcome::Text(self.workspace.edit(&path, &edits)?))
-            }
-
-            "sql_query" => {
-                let query = str_arg(args, "query")?;
-                let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
-                Ok(Outcome::Text(db::query(
-                    &self.db.lock().unwrap(),
-                    &query,
-                    limit.clamp(1, 500),
-                )?))
-            }
-
-            "cron_create" => {
-                let name = str_arg(args, "name")?;
-                let schedule = str_arg(args, "schedule")?;
-                let prompt = str_arg(args, "prompt")?;
-                let tz = args
-                    .get("timezone")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&self.config.timezone)
-                    .to_string();
-
-                let job = Job {
-                    name: name.clone(),
-                    schedule: schedule.clone(),
-                    timezone: tz,
-                    prompt,
-                    room_id: ctx.room_id.to_string(),
-                    enabled: true,
-                };
-                job.validate()?;
-                cron::upsert(&self.db.lock().unwrap(), &job)?;
-                Ok(Outcome::Text(format!(
-                    "Scheduled '{name}' at '{schedule}'. It takes effect on the next restart or immediately if the scheduler picked it up."
-                )))
-            }
-
-            "cron_delete" => {
-                let name = str_arg(args, "name")?;
-                let gone = cron::delete(&self.db.lock().unwrap(), &name)?;
-                Ok(Outcome::Text(if gone {
-                    format!("Deleted job '{name}'.")
-                } else {
-                    format!("No job named '{name}'.")
-                }))
-            }
-
+            "memory_recall" => self.memory_recall(args).await,
+            "memory_store" => self.memory_store(args, ctx),
+            "memory_forget" => self.memory_forget(args),
+            "search_messages" => self.search_messages(args).await,
+            "sql_query" => self.sql_query(args),
+            "send_message" => self.send_message(args, ctx),
+            "web_search" => self.web_search(args).await,
+            "web_fetch" => self.web_fetch(args).await,
+            "generate_image" => self.generate_image(args).await,
+            "run_code" => self.run_code(args).await,
+            "write_file" => self.write_file(args),
+            "edit_file" => self.edit_file(args),
+            "cron_create" => self.cron_create(args, ctx),
+            "cron_delete" => self.cron_delete(args),
             other => anyhow::bail!("unknown tool '{other}'"),
         }
+    }
+
+    async fn memory_recall(&self, args: &Value) -> Result<Outcome> {
+        let query = str_arg(args, "query")?;
+        let vector = self.embed_loose(&query).await;
+        let hits = memory::recall(
+            &self.db.lock().unwrap(),
+            &query,
+            vector.as_deref(),
+            limit(args, 8, 25),
+        )?;
+        Ok(Outcome::Text(if hits.is_empty() {
+            format!("No memories matched '{query}'.")
+        } else {
+            render_memories(&hits)
+        }))
+    }
+
+    fn memory_store(&self, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
+        let key = str_arg(args, "key")?;
+        let category = args
+            .get("category")
+            .and_then(Value::as_str)
+            .unwrap_or("core");
+        memory::store(
+            &self.db.lock().unwrap(),
+            &key,
+            &str_arg(args, "content")?,
+            category,
+            Some(ctx.room_id),
+        )?;
+        Ok(Outcome::Text(format!("Stored under '{key}'.")))
+    }
+
+    fn memory_forget(&self, args: &Value) -> Result<Outcome> {
+        let key = str_arg(args, "key")?;
+        Ok(Outcome::Text(
+            if memory::forget(&self.db.lock().unwrap(), &key)? {
+                format!("Deleted '{key}'.")
+            } else {
+                format!("No memory under '{key}'.")
+            },
+        ))
+    }
+
+    async fn search_messages(&self, args: &Value) -> Result<Outcome> {
+        let query = str_arg(args, "query")?;
+        let vector = self.embed_loose(&query).await;
+        let hits = messages::search(
+            &self.db.lock().unwrap(),
+            &query,
+            vector.as_deref(),
+            limit(args, 8, 30),
+        )?;
+        Ok(Outcome::Text(if hits.is_empty() {
+            format!("No messages matched '{query}'.")
+        } else {
+            render_messages(&hits)
+        }))
+    }
+
+    fn sql_query(&self, args: &Value) -> Result<Outcome> {
+        let query = str_arg(args, "query")?;
+        Ok(Outcome::Text(db::query(
+            &self.db.lock().unwrap(),
+            &query,
+            limit(args, 50, 500),
+        )?))
+    }
+
+    fn send_message(&self, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
+        let text = str_arg(args, "text")?;
+        Ok(Outcome::Text(match ctx.progress {
+            Some(sink) => {
+                let _ = sink.send(text);
+                "Sent to the room.".into()
+            }
+            None => "There is no room to send to from here.".to_string(),
+        }))
+    }
+
+    async fn web_search(&self, args: &Value) -> Result<Outcome> {
+        let query = str_arg(args, "query")?;
+        let n = args
+            .get("num_results")
+            .and_then(Value::as_u64)
+            .unwrap_or(5)
+            .clamp(1, 10);
+        let key = self
+            .exa_key
+            .as_ref()
+            .context("web search is unavailable: EXA_API_KEY is not set")?;
+
+        let payload: Value = self
+            .http
+            .post("https://api.exa.ai/search")
+            .header("x-api-key", key)
+            .json(&json!({
+                "query": query,
+                "numResults": n,
+                "contents": { "text": { "maxCharacters": 1200 } }
+            }))
+            .send()
+            .await
+            .context("calling Exa")?
+            .json()
+            .await
+            .context("decoding Exa response")?;
+
+        let results = payload
+            .get("results")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if results.is_empty() {
+            return Ok(Outcome::Text(format!("No results for '{query}'.")));
+        }
+
+        let body = results
+            .iter()
+            .map(|r| {
+                let field = |k| r.get(k).and_then(Value::as_str).unwrap_or_default();
+                format!(
+                    "{}\n{}\n{}",
+                    r.get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("(untitled)"),
+                    field("url"),
+                    truncate(field("text"), 900)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n");
+        Ok(Outcome::Text(body))
+    }
+
+    async fn web_fetch(&self, args: &Value) -> Result<Outcome> {
+        let url = str_arg(args, "url")?;
+        let body = self
+            .fetch_capped(reqwest::Method::GET, &url, None, None)
+            .await?;
+        let text = html2text::from_read(body.as_bytes(), 100).unwrap_or_else(|_| body.clone());
+        Ok(Outcome::Text(truncate(&text, 12_000)))
+    }
+
+    async fn generate_image(&self, args: &Value) -> Result<Outcome> {
+        let prompt = str_arg(args, "prompt")?;
+        let image = self
+            .llm
+            .image(&prompt, args.get("model").and_then(Value::as_str))
+            .await?;
+        Ok(Outcome::Image {
+            bytes: image.bytes,
+            media_type: image.media_type,
+            caption: prompt,
+        })
+    }
+
+    async fn run_code(&self, args: &Value) -> Result<Outcome> {
+        let out = self
+            .sandbox
+            .run(&str_arg(args, "language")?, &str_arg(args, "source")?, None)
+            .await?;
+
+        let mut report = out.stdout;
+        if !out.stderr.is_empty() {
+            report.push_str(&format!("\n[stderr]\n{}", out.stderr));
+        }
+        if out.timed_out {
+            report.push_str("\n[timed out]");
+        } else if out.exit_code.unwrap_or(0) != 0 {
+            report.push_str(&format!("\n[exit {}]", out.exit_code.unwrap_or(-1)));
+        }
+        if report.trim().is_empty() {
+            report.push_str("(no output)");
+        }
+        Ok(Outcome::Text(report))
+    }
+
+    fn write_file(&self, args: &Value) -> Result<Outcome> {
+        Ok(Outcome::Text(self.workspace.write(
+            &str_arg(args, "path")?,
+            &str_arg(args, "content")?,
+        )?))
+    }
+
+    fn edit_file(&self, args: &Value) -> Result<Outcome> {
+        let edits = args
+            .get("edits")
+            .and_then(Value::as_array)
+            .context("missing required argument 'edits'")?
+            .iter()
+            .map(|e| {
+                Ok(Edit {
+                    old: str_arg(e, "old_text")?,
+                    new: str_arg(e, "new_text")?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Outcome::Text(
+            self.workspace.edit(&str_arg(args, "path")?, &edits)?,
+        ))
+    }
+
+    fn cron_create(&self, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
+        let job = Job {
+            name: str_arg(args, "name")?,
+            schedule: str_arg(args, "schedule")?,
+            timezone: args
+                .get("timezone")
+                .and_then(Value::as_str)
+                .unwrap_or(&self.config.timezone)
+                .to_string(),
+            prompt: str_arg(args, "prompt")?,
+            room_id: ctx.room_id.to_string(),
+            enabled: true,
+        };
+        job.validate()?;
+        cron::upsert(&self.db.lock().unwrap(), &job)?;
+        Ok(Outcome::Text(format!(
+            "Scheduled '{}' at '{}'. The reconcile loop picks it up within a minute.",
+            job.name, job.schedule
+        )))
+    }
+
+    fn cron_delete(&self, args: &Value) -> Result<Outcome> {
+        let name = str_arg(args, "name")?;
+        Ok(Outcome::Text(
+            if cron::delete(&self.db.lock().unwrap(), &name)? {
+                format!("Deleted job '{name}'.")
+            } else {
+                format!("No job named '{name}'.")
+            },
+        ))
     }
 
     /// Embed the unquoted part of a query, which is what ranking by meaning uses.
@@ -574,6 +589,14 @@ fn render_messages(hits: &[messages::Archived]) -> String {
         .map(|h| format!("[{}] {}: {}", &h.at[..10.min(h.at.len())], h.sender, h.body))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A caller-supplied row limit, defaulted and clamped.
+fn limit(args: &Value, default: u64, max: u64) -> usize {
+    args.get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(default)
+        .clamp(1, max) as usize
 }
 
 fn str_arg(args: &Value, key: &str) -> Result<String> {
