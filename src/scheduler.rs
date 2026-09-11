@@ -19,11 +19,32 @@ pub async fn start(
     db: Arc<Mutex<rusqlite::Connection>>,
     agent: Arc<Agent>,
     bot: Arc<Bot>,
+    config: Arc<crate::config::Config>,
 ) -> Result<()> {
     let scheduler = JobScheduler::new()
         .await
         .context("creating job scheduler")?;
     scheduler.start().await.context("starting scheduler")?;
+
+    // Registered directly rather than stored in the cron table, so it cannot be
+    // deleted by accident and appears without a migration.
+    if config.dreaming.enabled
+        && let Some(room_id) = config.allowed_rooms.first()
+    {
+        crate::dream::schedule(
+            &scheduler,
+            Arc::clone(&agent),
+            room_id.clone(),
+            &config.dreaming.schedule,
+            config.tz(),
+        )
+        .await?;
+        tracing::info!(
+            schedule = %config.dreaming.schedule,
+            timezone = %config.timezone,
+            "dreaming scheduled"
+        );
+    }
 
     tokio::spawn(async move {
         // name -> (uuid, fingerprint).
