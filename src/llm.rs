@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::RwLock;
@@ -215,56 +215,46 @@ impl Llm {
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some(newline) = buffer.find('\n') {
-                let line = buffer[..newline].trim().to_string();
-                buffer.drain(..=newline);
-
-                let Some(data) = line.strip_prefix("data:") else {
+                let line: String = buffer.drain(..=newline).collect();
+                let Some(data) = line.trim().strip_prefix("data:").map(str::trim) else {
                     continue;
                 };
-                let data = data.trim();
                 if data == "[DONE]" {
-                    break;
+                    anyhow::ensure!(
+                        !content.trim().is_empty() || !calls.is_empty(),
+                        "OpenRouter returned an empty response"
+                    );
+                    return Ok(Completion {
+                        message: Message {
+                            role: "assistant".into(),
+                            content: (!content.is_empty()).then_some(Value::String(content)),
+                            tool_calls: calls,
+                            tool_call_id: None,
+                        },
+                        usage,
+                    });
                 }
-                let Ok(event): std::result::Result<Value, _> = serde_json::from_str(data) else {
-                    continue;
-                };
+                let event: Value =
+                    serde_json::from_str(data).context("invalid OpenRouter event")?;
+                if let Some(error) = event.get("error") {
+                    bail!("OpenRouter stream error: {}", head(&error.to_string()));
+                }
 
                 if let Some(u) = event.get("usage") {
-                    usage.prompt = u
-                        .get("prompt_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(usage.prompt);
-                    usage.completion = u
-                        .get("completion_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(usage.completion);
+                    usage.prompt = u["prompt_tokens"].as_u64().unwrap_or(usage.prompt);
+                    usage.completion = u["completion_tokens"].as_u64().unwrap_or(usage.completion);
                 }
 
-                let Some(delta) = event.pointer("/choices/0/delta") else {
-                    continue;
-                };
-                if let Some(text) = delta.get("content").and_then(Value::as_str) {
-                    content.push_str(text);
-                }
-                if let Some(parts) = delta.get("tool_calls").and_then(Value::as_array) {
-                    merge_tool_calls(&mut calls, parts);
+                if let Some(delta) = event.pointer("/choices/0/delta") {
+                    content.push_str(delta["content"].as_str().unwrap_or_default());
+                    if let Some(parts) = delta["tool_calls"].as_array() {
+                        merge_tool_calls(&mut calls, parts);
+                    }
                 }
             }
         }
 
-        Ok(Completion {
-            message: Message {
-                role: "assistant".into(),
-                content: if content.is_empty() {
-                    None
-                } else {
-                    Some(Value::String(content))
-                },
-                tool_calls: calls,
-                tool_call_id: None,
-            },
-            usage,
-        })
+        bail!("OpenRouter stream ended before [DONE]")
     }
 }
 
