@@ -136,7 +136,7 @@
                 --setenv HOME /root \
                 --setenv PATH /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
                 --setenv TMPDIR /tmp \
-                "''${interp[@]}"
+                /bin/sh /job/script
           '';
         };
       });
