@@ -94,7 +94,7 @@ jobs:
 
           out=$(echo 'echo $((6*7)); pwd' \
             | MERLIN_SANDBOX_ROOT="$root" MERLIN_WORKSPACE="$work" \
-              ./result/bin/merlin-sandbox bash)
+              ./result/bin/merlin-sandbox)
           echo "sandbox said: $out"
           [ "$(echo "$out" | sed -n 1p)" = "42" ] || { echo "arithmetic failed"; exit 1; }
           [ "$(echo "$out" | sed -n 2p)" = "/work" ] || { echo "wrong working directory"; exit 1; }

@@ -184,15 +184,12 @@ pub fn definitions() -> Vec<Value> {
             }),
         ),
         f(
-            "run_code",
-            "Execute code in the sandbox and return its output. It runs in the workspace, so files you wrote are there and files it writes persist for later turns and later tools. Has network access but cannot reach the LAN or read any secrets. Use for calculation, data processing, and for running and testing code you have written.",
+            "bash",
+            "Run a bash script in your sandbox and return its output. It starts in the workspace, so files you wrote are there and anything it writes persists for later turns. You are root in there and it keeps what you install, so apk add, pip install and npm i all work. Reach python with python3, and the internet with curl. The LAN is unreachable and no secret is visible.",
             json!({
                 "type": "object",
-                "properties": {
-                    "language": { "type": "string", "enum": ["python", "bash"] },
-                    "source": { "type": "string" }
-                },
-                "required": ["language", "source"]
+                "properties": { "script": { "type": "string" } },
+                "required": ["script"]
             }),
         ),
         f(
@@ -262,7 +259,7 @@ impl Tools {
             "web_search" => self.web_search(args).await,
             "web_fetch" => self.web_fetch(args).await,
             "generate_image" => self.generate_image(args).await,
-            "run_code" => self.run_code(args).await,
+            "bash" => self.bash(args).await,
             "write_file" => self.write_file(args),
             "edit_file" => self.edit_file(args),
             "cron_create" => self.cron_create(args, ctx),
@@ -397,7 +394,7 @@ impl Tools {
                         .and_then(Value::as_str)
                         .unwrap_or("(untitled)"),
                     field("url"),
-                    truncate(field("text"), 900)
+                    crate::truncate(field("text"), 900)
                 )
             })
             .collect::<Vec<_>>()
@@ -411,7 +408,7 @@ impl Tools {
             .fetch_capped(reqwest::Method::GET, &url, None, None)
             .await?;
         let text = html2text::from_read(body.as_bytes(), 100).unwrap_or_else(|_| body.clone());
-        Ok(Outcome::Text(truncate(&text, 12_000)))
+        Ok(Outcome::Text(crate::truncate(&text, 12_000)))
     }
 
     async fn generate_image(&self, args: &Value) -> Result<Outcome> {
@@ -427,11 +424,8 @@ impl Tools {
         })
     }
 
-    async fn run_code(&self, args: &Value) -> Result<Outcome> {
-        let out = self
-            .sandbox
-            .run(&str_arg(args, "language")?, &str_arg(args, "source")?, None)
-            .await?;
+    async fn bash(&self, args: &Value) -> Result<Outcome> {
+        let out = self.sandbox.run(&str_arg(args, "script")?).await?;
 
         let mut report = out.stdout;
         if !out.stderr.is_empty() {
@@ -563,7 +557,7 @@ impl Tools {
 
         let text = String::from_utf8_lossy(&bytes).to_string();
         if !status.is_success() {
-            return Ok(format!("HTTP {status}\n{}", truncate(&text, 2000)));
+            return Ok(format!("HTTP {status}\n{}", crate::truncate(&text, 2000)));
         }
         Ok(text)
     }
@@ -604,15 +598,4 @@ fn str_arg(args: &Value, key: &str) -> Result<String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .with_context(|| format!("missing required argument '{key}'"))
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
 }

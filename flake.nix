@@ -76,9 +76,8 @@
             inherit (source) hash;
           };
 
-        # The only thing merlin may invoke through sudo. It takes a language on
-        # argv and a script on stdin, and runs it inside a persistent root that
-        # has no view of the host at all.
+        # The only thing merlin may invoke through sudo. It takes a script on
+        # stdin and runs it inside a persistent root with no view of the host.
         merlin-sandbox = pkgs.writeShellApplication {
           name = "merlin-sandbox";
           runtimeInputs = with pkgs; [ bubblewrap coreutils ];
@@ -87,9 +86,8 @@
 
             # Taken from argv, not the environment: sudo runs with env_reset,
             # so anything exported by the caller is stripped before this runs.
-            lang="''${1:-bash}"
-            timeout_s="''${2:-60}"
-            address_space_kb="''${3:-0}"
+            timeout_s="''${1:-60}"
+            address_space_kb="''${2:-0}"
             root="''${MERLIN_SANDBOX_ROOT:-/var/lib/merlin-sandbox}"
             work="''${MERLIN_WORKSPACE:-/var/lib/merlin-workspace}"
 
@@ -101,12 +99,6 @@
             job="$(mktemp -d)"
             trap 'rm -rf "$job"' EXIT
             cat > "$job/script"
-
-            case "$lang" in
-              python) interp=(python3 /job/script) ;;
-              bash|sh) interp=(/bin/sh /job/script) ;;
-              *) echo "unsupported language: $lang" >&2; exit 2 ;;
-            esac
 
             # The workspace is shared with the bot through a group, and the
             # default 022 would leave everything the sandbox writes read-only to

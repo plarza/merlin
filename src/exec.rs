@@ -1,4 +1,4 @@
-//! Sandboxed code execution.
+//! Sandboxed shell execution.
 //!
 //! Runs as a distinct `merlin-exec` uid rather than the bot's own, for two reasons: that user cannot read `/var/lib/merlin` (the memory database,
 //! the cron store) or the EnvironmentFile holding every API key, and a separate uid is something the firewall can match on, which is how LAN egress gets denied while public internet stays reachable.
@@ -42,9 +42,8 @@ impl Sandbox {
         }
     }
 
-    pub async fn run(&self, language: &str, source: &str, stdin: Option<&str>) -> Result<Output> {
-        let lang = normalize_language(language)?;
-
+    /// Run a shell script in the sandbox.
+    pub async fn run(&self, source: &str) -> Result<Output> {
         let (program, args) = self
             .runner
             .split_first()
@@ -52,7 +51,6 @@ impl Sandbox {
 
         let mut cmd = Command::new(program);
         cmd.args(args)
-            .arg(lang)
             .arg(self.timeout.as_secs().to_string())
             .arg(address_space_kb(&self.memory_max).to_string())
             .stdin(Stdio::piped())
@@ -66,11 +64,7 @@ impl Sandbox {
 
         // Source arrives on stdin rather than as a temp file, so nothing the agent writes ever lands on a filesystem the bot user can see.
         if let Some(mut sink) = child.stdin.take() {
-            let payload = match stdin {
-                Some(extra) => format!("{source}\n\u{0}{extra}"),
-                None => source.to_string(),
-            };
-            sink.write_all(payload.as_bytes()).await.ok();
+            sink.write_all(source.as_bytes()).await.ok();
             sink.shutdown().await.ok();
         }
 
@@ -78,8 +72,8 @@ impl Sandbox {
             Ok(result) => {
                 let out = result.context("collecting sandbox output")?;
                 Ok(Output {
-                    stdout: truncate(&String::from_utf8_lossy(&out.stdout), self.max_output),
-                    stderr: truncate(&String::from_utf8_lossy(&out.stderr), self.max_output),
+                    stdout: crate::truncate(&String::from_utf8_lossy(&out.stdout), self.max_output),
+                    stderr: crate::truncate(&String::from_utf8_lossy(&out.stderr), self.max_output),
                     exit_code: out.status.code(),
                     timed_out: false,
                 })
@@ -109,24 +103,4 @@ fn address_space_kb(size: &str) -> u64 {
         _ => (raw, 1),
     };
     digits.trim().parse::<u64>().unwrap_or(0) * scale
-}
-
-fn normalize_language(language: &str) -> Result<&'static str> {
-    match language.trim().to_lowercase().as_str() {
-        "python" | "python3" | "py" => Ok("python"),
-        "bash" | "sh" | "shell" => Ok("bash"),
-        other => anyhow::bail!("unsupported language '{other}'; use python or bash"),
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    // Cut on a char boundary so the result stays valid UTF-8.
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\n… truncated at {} bytes", &s[..end], max)
 }

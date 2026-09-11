@@ -650,7 +650,7 @@ async fn the_sandbox_runs_a_program_and_returns_its_output() {
         10,
         "1G".into(),
     );
-    let out = sb.run("python", "print(6*7)", None).await.unwrap();
+    let out = sb.run("echo 42").await.unwrap();
     assert_eq!(out.stdout.trim(), "42");
     assert!(!out.timed_out);
 }
@@ -662,15 +662,9 @@ async fn a_wedged_program_is_killed_rather_than_hanging_the_turn() {
         1,
         "1G".into(),
     );
-    let out = sb.run("bash", "true", None).await.unwrap();
+    let out = sb.run("true").await.unwrap();
     assert!(out.timed_out);
     assert!(out.stderr.contains("killed"));
-}
-
-#[tokio::test]
-async fn an_unsupported_language_is_refused_before_spawning() {
-    let sb = Sandbox::new(vec!["/bin/false".into()], 5, "1G".into());
-    assert!(sb.run("ruby", "puts 1", None).await.is_err());
 }
 
 // ── model wire format ───────────────────────────────────────────────────────
@@ -743,7 +737,7 @@ fn every_tool_the_agent_is_offered_is_described() {
         "send_message",
         "write_file",
         "edit_file",
-        "run_code",
+        "bash",
         "cron_create",
         "sql_query",
         "cron_delete",
@@ -856,11 +850,11 @@ async fn the_run_limits_reach_the_sandbox_as_arguments() {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let sb = Sandbox::new(vec![script.display().to_string()], 30, "1G".into());
-    let out = sb.run("python", "print(1)", None).await.unwrap();
+    let out = sb.run("echo hello").await.unwrap();
 
     assert_eq!(
         out.stdout.lines().collect::<Vec<_>>(),
-        vec!["python", "30", "1048576"],
-        "language, timeout in seconds, then the address space limit in kB"
+        vec!["30", "1048576"],
+        "timeout in seconds, then the address space limit in kB"
     );
 }

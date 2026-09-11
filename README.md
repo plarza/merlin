@@ -21,14 +21,14 @@ a matrix agent in rust. memory, message search, scheduled jobs, and a persistent
 | `send_message` | `text` |
 | `write_file` | `path`, `content` |
 | `edit_file` | `path`, `edits` |
-| `run_code` | `language`, `source` |
+| `bash` | `script` |
 | `web_search` | `query`, `num_results` |
 | `web_fetch` | `url` |
 | `generate_image` | `prompt`, `model` |
 | `cron_create` | `name`, `schedule`, `prompt`, `timezone` |
 | `cron_delete` | `name` |
 
-reading, listing, searching files, HTTP requests and the clock are shell commands in the sandbox. the current time is in the system prompt.
+reading, listing, searching files, HTTP requests, python and the clock are all `bash`. the current time is in the system prompt.
 
 `send_message` posts to the room mid-turn without ending it. the final answer is sent automatically.
 
@@ -70,7 +70,7 @@ a background loop embeds rows with no vector, newest first, in batches of `embed
 
 ## sandbox
 
-`run_code` runs bash or python in a persistent Alpine root, via `sudo -u merlin-exec`.
+`bash` runs a script in a persistent Alpine root, via `sudo -u merlin-exec`.
 
 the process is uid 0 inside a user namespace and unprivileged outside it. `apk add`, `pip install` and `npm i` work and persist across turns.
 
@@ -84,7 +84,7 @@ bubblewrap unshares every namespace except the network:
 
 `/etc/resolv.conf` inside the sandbox points at 1.1.1.1 and 8.8.8.8. the host's resolver is a LAN address and LAN egress is rejected.
 
-the workspace is a separate directory, mode `2770` and group `merlin-work`, bind-mounted at `/work` and the working directory for `run_code`. `write_file` and `edit_file` act on the same directory. the Alpine root itself is `0700 merlin-exec`.
+the workspace is a separate directory, mode `2770` and group `merlin-work`, bind-mounted at `/work` and the working directory for `bash`. `write_file` and `edit_file` act on the same directory. the Alpine root itself is `0700 merlin-exec`.
 
 ## scheduling
 
@@ -157,7 +157,6 @@ merlin --config ./config.toml
 | flag | effect |
 | --- | --- |
 | `--config <path>` | config file, default `/var/lib/merlin/config.toml` |
-| `--import-memories <db>` | import from a table with `id`, `key`, `content`, `category`, `created_at`, then exit |
 | `--import-keys <file>` | import an exported room key file, then exit |
 | `--backfill <pages>` | page room history 100 events at a time, archive what decrypts, then exit |
 
