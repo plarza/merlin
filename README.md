@@ -6,7 +6,7 @@
   <img src="docs/title-light.svg" alt="merlin" width="300">
 </picture>
 
-**a pico openclaw alternative with a long memory and a pointy hat**
+**a pico openclaw alternative with a pointy hat**
 </div>
 
 
