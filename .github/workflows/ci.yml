@@ -49,7 +49,7 @@ jobs:
     # Secrets are unavailable to a step-level `if`, so the decision is made once
     # here, at job level, where the secrets context does resolve.
     env:
-      CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME || 's1dny' }}
+      CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME || 'merlin' }}
       HAVE_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN != '' && 'yes' || 'no' }}
     steps:
       - uses: actions/checkout@v4
