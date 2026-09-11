@@ -247,17 +247,7 @@ impl Bot {
         tracing::info!(%sender, chars = body.len(), "turn started");
         let started = std::time::Instant::now();
 
-        let typing = {
-            let room = room.clone();
-            tokio::spawn(async move {
-                loop {
-                    if let Err(e) = set_typing(&room, true).await {
-                        tracing::warn!(error = %e, "could not send typing notice");
-                    }
-                    tokio::time::sleep(TYPING_REFRESH).await;
-                }
-            })
-        };
+        let typing = Typing::start(room.clone());
 
         let mut body = body;
         let attachments = match attached {
@@ -274,6 +264,11 @@ impl Bot {
                     if let Err(e) = bot.send_text(&room, &text).await {
                         tracing::warn!(error = %e, "failed sending an intermediate message");
                     }
+                    // Clients drop the indicator when a message from the sender
+                    // arrives, and re-asserting `true` alone would change
+                    // nothing server-side and so produce no event to wake them
+                    // back up. The retraction is what makes the next notice a
+                    // change worth broadcasting.
                     let _ = set_typing(&room, false).await;
                     let _ = set_typing(&room, true).await;
                 }
@@ -330,8 +325,7 @@ impl Bot {
             }
         };
 
-        typing.abort();
-        let _ = set_typing(&room, false).await;
+        typing.finish().await;
         sent
     }
 
@@ -455,6 +449,45 @@ impl Bot {
         // transcript reads consistently whoever sent the picture.
         self.remember_own(room, sent.event_id.as_str(), &format!("[file] {caption}"));
         Ok(())
+    }
+}
+
+// A typing notice lapses unless it is refreshed, and it has to be retracted
+// exactly once, after the last refresh has landed. Aborting the refresh task
+// and retracting from the outside raced: a `true` already in flight could
+// arrive after the `false` and leave merlin typing until the server's timeout
+// ran out. That is worse than it sounds — the next turn's notice then changes
+// nothing server-side, so no event is broadcast, and a client that has since
+// hidden the indicator is never told to show it again. Owning the retraction
+// here keeps it ordered behind every refresh.
+struct Typing {
+    stop: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Typing {
+    fn start(room: Room) -> Self {
+        let (stop, mut halt) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            loop {
+                if let Err(e) = set_typing(&room, true).await {
+                    tracing::warn!(error = %e, "could not send typing notice");
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(TYPING_REFRESH) => {}
+                    _ = &mut halt => break,
+                }
+            }
+            if let Err(e) = set_typing(&room, false).await {
+                tracing::warn!(error = %e, "could not retract typing notice");
+            }
+        });
+        Self { stop, task }
+    }
+
+    async fn finish(self) {
+        let _ = self.stop.send(());
+        let _ = self.task.await;
     }
 }
 
