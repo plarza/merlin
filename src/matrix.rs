@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use mxlink::matrix_sdk::Room;
 use mxlink::matrix_sdk::media::{MediaFormat, MediaRequestParameters};
+use mxlink::matrix_sdk::ruma::api::client::typing::create_typing_event;
 use mxlink::matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
 };
@@ -17,7 +18,8 @@ use crate::config::{Config, Secrets};
 use crate::llm::Attachment;
 use crate::room::{Buffers, Turn, is_addressed};
 
-const TYPING_REFRESH: Duration = Duration::from_secs(3);
+const TYPING_TIMEOUT: Duration = Duration::from_secs(30);
+const TYPING_REFRESH: Duration = Duration::from_secs(10);
 
 struct Attached {
     source: mxlink::matrix_sdk::ruma::events::room::MediaSource,
@@ -230,22 +232,22 @@ impl Bot {
         tracing::info!(%sender, chars = body.len(), "turn started");
         let started = std::time::Instant::now();
 
-        let mut body = body;
-        let attachments = match attached {
-            Some(file) => self.receive(&room, file, &mut body).await,
-            None => Vec::new(),
-        };
-
         let typing = {
             let room = room.clone();
             tokio::spawn(async move {
                 loop {
-                    if room.typing_notice(true).await.is_err() {
-                        tracing::debug!("could not send typing notice");
+                    if let Err(e) = set_typing(&room, true).await {
+                        tracing::warn!(error = %e, "could not send typing notice");
                     }
                     tokio::time::sleep(TYPING_REFRESH).await;
                 }
             })
+        };
+
+        let mut body = body;
+        let attachments = match attached {
+            Some(file) => self.receive(&room, file, &mut body).await,
+            None => Vec::new(),
         };
 
         let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -279,7 +281,7 @@ impl Bot {
         drop(progress);
         let _ = pump.await;
         typing.abort();
-        let _ = room.typing_notice(false).await;
+        let _ = set_typing(&room, false).await;
 
         let ms = started.elapsed().as_millis() as u64;
         match result {
@@ -428,4 +430,24 @@ impl Bot {
             .map_err(|e| anyhow::anyhow!("sending image failed: {e:?}"))?;
         Ok(())
     }
+}
+
+async fn set_typing(room: &Room, typing: bool) -> Result<()> {
+    let state = if typing {
+        create_typing_event::v3::Typing::Yes(create_typing_event::v3::TypingInfo::new(
+            TYPING_TIMEOUT,
+        ))
+    } else {
+        create_typing_event::v3::Typing::No
+    };
+    let request = create_typing_event::v3::Request::new(
+        room.own_user_id().to_owned(),
+        room.room_id().to_owned(),
+        state,
+    );
+    room.client()
+        .send(request)
+        .await
+        .context("sending a typing notice")?;
+    Ok(())
 }
