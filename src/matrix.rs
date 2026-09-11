@@ -292,11 +292,8 @@ impl Bot {
 
         drop(progress);
         let _ = pump.await;
-        typing.abort();
-        let _ = set_typing(&room, false).await;
-
         let ms = started.elapsed().as_millis() as u64;
-        match result {
+        let sent = match result {
             Ok(turn) => {
                 tracing::info!(
                     ms,
@@ -316,16 +313,21 @@ impl Bot {
                         tracing::warn!(error = %e, "failed sending image");
                     }
                 }
-                if !turn.text.is_empty() {
-                    self.send_text(&room, &turn.text).await?;
+                if turn.text.is_empty() {
+                    Ok(())
+                } else {
+                    self.send_text(&room, &turn.text).await
                 }
             }
             Err(e) => {
                 tracing::warn!(error = %e, ms, "turn failed");
-                self.send_text(&room, &format!("that failed: {e}")).await?;
+                self.send_text(&room, &format!("that failed: {e}")).await
             }
-        }
-        Ok(())
+        };
+
+        typing.abort();
+        let _ = set_typing(&room, false).await;
+        sent
     }
 
     pub async fn post(&self, room_id: &str, text: &str) -> Result<()> {
