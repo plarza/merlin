@@ -1,7 +1,8 @@
+use merlin::commands::Command;
 use merlin::cron::{self, Job};
 use merlin::embed::{self, Memories, Messages};
 use merlin::exec::Sandbox;
-use merlin::llm::{Attachment, Message};
+use merlin::llm::{Attachment, Llm, Message};
 use merlin::room::{Buffers, Turn, is_addressed};
 use merlin::tools::definitions;
 use merlin::{db, memory, messages};
@@ -22,6 +23,44 @@ fn scratch(name: &str) -> std::path::PathBuf {
 
 fn database(name: &str) -> Connection {
     db::open(&scratch(name).join("merlin.db")).unwrap()
+}
+
+#[test]
+fn slash_commands_must_be_the_whole_message() {
+    assert_eq!(Command::parse("/help"), Some(Command::Help));
+    assert_eq!(Command::parse("/model"), Some(Command::Model(None)));
+    assert_eq!(
+        Command::parse("/model openai/gpt-5.6-sol"),
+        Some(Command::Model(Some("openai/gpt-5.6-sol")))
+    );
+    assert_eq!(Command::parse("/reasoning"), Some(Command::Reasoning(None)));
+    assert_eq!(
+        Command::parse("/reasoning high"),
+        Some(Command::Reasoning(Some("high")))
+    );
+
+    for invalid in [
+        "/model ",
+        "/model  openai/gpt-5.6-sol",
+        "/model openai/gpt-5.6-sol please",
+        "merlin /model openai/gpt-5.6-sol",
+        "/model openai/gpt-5.6-sol\n",
+        "/help please",
+        "/reasoning ",
+        "/reasoning very high",
+    ] {
+        assert_eq!(Command::parse(invalid), None, "accepted {invalid:?}");
+    }
+}
+
+#[test]
+fn switching_model_returns_the_previous_slug() {
+    let llm = Llm::new("key".into(), "old/model".into(), "medium".into(), 10).unwrap();
+
+    assert_eq!(llm.switch_model("new/model"), "old/model");
+    assert_eq!(llm.model(), "new/model");
+    assert_eq!(llm.switch_reasoning_effort("high"), "medium");
+    assert_eq!(llm.reasoning_effort(), "high");
 }
 
 #[test]

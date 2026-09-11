@@ -28,6 +28,19 @@
 | `cron_create` | `name`, `schedule`, `prompt`, `timezone` |
 | `cron_delete` | `name` |
 
+## slash commands
+
+Slash commands must be the entire message. They are handled immediately without
+calling the chat model.
+
+| Command | Effect |
+| --- | --- |
+| `/help` | List available slash commands |
+| `/model` | Show the current chat model |
+| `/model <model-slug>` | Switch the chat model for subsequent turns until Merlin restarts |
+| `/reasoning` | Show the current reasoning effort |
+| `/reasoning <effort>` | Switch the reasoning effort for subsequent turns until Merlin restarts |
+
 ## storage
 
 ```

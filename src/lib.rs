@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod backfill;
+pub mod commands;
 pub mod config;
 pub mod cron;
 pub mod db;

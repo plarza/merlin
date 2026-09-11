@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::sync::RwLock;
 use std::time::Duration;
 
 const CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -8,7 +9,12 @@ const CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 pub struct Llm {
     http: reqwest::Client,
     api_key: String,
-    chat_model: String,
+    settings: RwLock<ChatSettings>,
+}
+
+#[derive(Clone)]
+struct ChatSettings {
+    model: String,
     reasoning_effort: String,
 }
 
@@ -120,9 +126,30 @@ impl Llm {
         Ok(Self {
             http,
             api_key,
-            chat_model,
-            reasoning_effort,
+            settings: RwLock::new(ChatSettings {
+                model: chat_model,
+                reasoning_effort,
+            }),
         })
+    }
+
+    pub fn model(&self) -> String {
+        self.settings.read().unwrap().model.clone()
+    }
+
+    pub fn switch_model(&self, model: impl Into<String>) -> String {
+        std::mem::replace(&mut self.settings.write().unwrap().model, model.into())
+    }
+
+    pub fn reasoning_effort(&self) -> String {
+        self.settings.read().unwrap().reasoning_effort.clone()
+    }
+
+    pub fn switch_reasoning_effort(&self, effort: impl Into<String>) -> String {
+        std::mem::replace(
+            &mut self.settings.write().unwrap().reasoning_effort,
+            effort.into(),
+        )
     }
 
     pub async fn chat(&self, messages: &[Message], tools: &[Value]) -> Result<Completion> {
@@ -138,8 +165,11 @@ impl Llm {
     }
 
     async fn chat_once(&self, messages: &[Message], tools: &[Value]) -> Result<Completion> {
+        // Snapshot the settings before the request so slash commands cannot
+        // alter a request that is already in flight.
+        let settings = self.settings.read().unwrap().clone();
         let mut body = json!({
-            "model": self.chat_model,
+            "model": settings.model,
             "messages": messages,
             "stream": true,
             "stream_options": { "include_usage": true },
@@ -149,8 +179,8 @@ impl Llm {
             body["tool_choice"] = json!("auto");
         }
 
-        if !self.reasoning_effort.is_empty() && self.reasoning_effort != "default" {
-            body["reasoning"] = json!({ "effort": self.reasoning_effort });
+        if !settings.reasoning_effort.is_empty() && settings.reasoning_effort != "default" {
+            body["reasoning"] = json!({ "effort": settings.reasoning_effort });
         }
 
         let resp = self

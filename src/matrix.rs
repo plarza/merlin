@@ -15,12 +15,14 @@ use mxlink::{
 };
 
 use crate::agent::{Agent, Incoming};
+use crate::commands::Command;
 use crate::config::{Config, Secrets};
 use crate::llm::Attachment;
 use crate::room::{Buffers, Turn, is_addressed};
 
 const TYPING_TIMEOUT: Duration = Duration::from_secs(30);
 const TYPING_REFRESH: Duration = Duration::from_secs(10);
+const HELP: &str = "Available commands:\n/help — Show this help\n/model — Show the current model\n/model <model-slug> — Switch the chat model\n/reasoning — Show the current reasoning effort\n/reasoning <effort> — Switch the reasoning effort";
 
 struct Attached {
     source: mxlink::matrix_sdk::ruma::events::room::MediaSource,
@@ -153,6 +155,14 @@ impl Bot {
         let sender = event.sender.to_string();
         self.remember(event.event_id.as_str(), &room_id, &sender, &body);
 
+        if let Some(command) = Command::parse(&body) {
+            if !self.config.is_allowed_sender(&sender) {
+                tracing::info!(%sender, "command sent by a sender who is not allowed");
+                return Ok(());
+            }
+            return self.run_command(&room, command).await;
+        }
+
         let reply_parent = self.reply_parent(&room, &event).await;
         if !self.should_answer(&event, &body, &sender, reply_parent.as_ref()) {
             return Ok(());
@@ -167,6 +177,41 @@ impl Bot {
             reply_parent.map(|(_, body)| body),
         )
         .await
+    }
+
+    async fn run_command(&self, room: &Room, command: Command<'_>) -> Result<()> {
+        match command {
+            Command::Help => self.send_text(room, HELP).await,
+            Command::Model(None) => {
+                self.send_text(room, &format!("Current model: {}", self.agent.llm.model()))
+                    .await
+            }
+            Command::Model(Some(model)) => {
+                let previous = self.agent.llm.switch_model(model);
+                tracing::info!(from = %previous, to = %model, "chat model switched");
+                self.send_text(room, &format!("Switched model from {previous} to {model}"))
+                    .await
+            }
+            Command::Reasoning(None) => {
+                self.send_text(
+                    room,
+                    &format!(
+                        "Current reasoning effort: {}",
+                        self.agent.llm.reasoning_effort()
+                    ),
+                )
+                .await
+            }
+            Command::Reasoning(Some(effort)) => {
+                let previous = self.agent.llm.switch_reasoning_effort(effort);
+                tracing::info!(from = %previous, to = %effort, "reasoning effort switched");
+                self.send_text(
+                    room,
+                    &format!("Switched reasoning effort from {previous} to {effort}"),
+                )
+                .await
+            }
+        }
     }
 
     fn remember(&self, event_id: &str, room_id: &str, sender: &str, body: &str) {
