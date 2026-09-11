@@ -54,6 +54,49 @@ moving the hardware          pure meaning, matches "relocating the machines"
 cron_create(name="hn", schedule="0 7 * * *", prompt="post the top Hacker News stories")
 ```
 
+## setup
+
+**1. matrix.** register an account for the bot on your homeserver and sign into it once from a normal client. merlin never accepts invitations, so use that session to join every room it should answer in, and turn on secure backup — the passphrase it gives you becomes `MATRIX_RECOVERY_PASSPHRASE`, and without it a fresh login has no room keys and reads nothing. take the internal room id out of the room's settings (`!abc:matrix.example.org`, not the `#alias`); `allowed_rooms` matches on that.
+
+**2. keys.** `OPENROUTER_API_KEY` drives both chat and embeddings, so it is never optional. `EXA_API_KEY` is only read by `web_search`, `FAL_API_KEY` only when `image_provider = "fal"`.
+
+**3. config.** write the TOML below to `config.toml`, with `allowed_rooms` and `allowed_senders` filled in — both are rejected empty, since the bot would either join nothing or answer nobody. secrets stay in the environment; nothing in this file is private.
+
+**4a. nixos.** the module is the whole deployment: it creates the `merlin` and `merlin-exec` users, unpacks the sandbox root, writes the sudo rule that joins them, and firewalls executed code off the LAN.
+
+```nix
+{
+  inputs.merlin.url = "github:plarza/merlin";
+
+  outputs = { nixpkgs, merlin, ... }: {
+    nixosConfigurations.host = nixpkgs.lib.nixosSystem {
+      modules = [ merlin.nixosModules.default ./merlin.nix ];
+    };
+  };
+}
+```
+
+`./merlin.nix` carries the `services.merlin` block from [running](#running). point `environmentFile` at a file of `KEY=value` lines readable only by root.
+
+**4b. anywhere else.** `cargo build --release`, then create the state directory and hand it to the user merlin runs as:
+
+```sh
+install -d -m 0700 -o merlin -g merlin /var/lib/merlin
+install -d -m 2770 -o merlin -g merlin /var/lib/merlin-workspace
+```
+
+the default sandbox runner is a NixOS path, so set `MERLIN_EXEC_RUNNER` to your own bubblewrap or container wrapper — it is invoked with a timeout in seconds and an address-space limit in kilobytes, and takes the script on stdin. leaving it unset costs you `bash` alone; every other tool still works.
+
+**5. first run.** start it and wait for `connected` in the log. history from before the bot joined is invisible until you page it in:
+
+```sh
+merlin --config ./config.toml --backfill 50
+```
+
+if that reports mostly undecryptable events, the account's key backup never reached this device: export the keys from the client you set up in step 1 and `--import-keys` them, with the export passphrase in `MATRIX_KEY_EXPORT_PASSPHRASE`.
+
+> the session blob is keyed on `MATRIX_PASSWORD`, so rotating the password orphans it and forces a new device. set `SESSION_ENCRYPTION_KEY` to something stable up front if you expect to rotate.
+
 ## configuration
 
 ```toml
@@ -65,6 +108,7 @@ allowed_rooms   = ["!room:matrix.example.org"]
 allowed_senders = ["@you:matrix.example.org"]
 context_window  = 64
 timezone        = "Australia/Sydney"
+state_dir       = "/var/lib/merlin"
 
 [model]
 chat                 = "z-ai/glm-5.3-flash"
@@ -90,6 +134,8 @@ embed_batch        = 32
 | `EXA_API_KEY` | for `web_search` |
 | `FAL_API_KEY` | when `image_provider = "fal"` (`FAL_KEY` also accepted) |
 | `MATRIX_RECOVERY_PASSPHRASE` | for key backup recovery |
+| `MATRIX_KEY_EXPORT_PASSPHRASE` | for `--import-keys` |
+| `SESSION_ENCRYPTION_KEY` | no, defaults to `MATRIX_PASSWORD` |
 | `MERLIN_ALLOWED_ROOMS`, `MERLIN_ALLOWED_SENDERS` | override the config file |
 | `MERLIN_EXEC_RUNNER` | override the sandbox command |
 
