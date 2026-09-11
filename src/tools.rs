@@ -55,176 +55,138 @@ pub fn definitions() -> Vec<Value> {
             "memory_recall",
             "Search your durable memory. Use this BEFORE answering about any person, character, project, file or past decision, and before saying you have no record of something. Unquoted words are matched by meaning, so you can describe what you are after rather than guess the wording. Put a word in double quotes to require it exactly.",
             json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Describe the subject; \"quoted\" words are required exactly" },
-                    "limit": { "type": "integer", "description": "Max results, default 8" }
-                },
-                "required": ["query"]
+                "query": { "type": "string", "description": "Describe the subject; \"quoted\" words are required exactly" },
+                "limit": { "type": "integer", "description": "Max results, default 8" }
             }),
+            &["query"],
         ),
         f(
             "memory_store",
             "Save something durably. Re-using an existing key revises that entry instead of creating a duplicate.",
             json!({
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "Short stable identifier, reused to revise an entry, e.g. 'kettle' or 'owner-timezone'" },
-                    "content": { "type": "string" },
-                    "category": { "type": "string", "enum": ["core", "daily", "conversation"] }
-                },
-                "required": ["key", "content"]
+                "key": { "type": "string", "description": "Short stable identifier, reused to revise an entry, e.g. 'kettle' or 'owner-timezone'" },
+                "content": { "type": "string" },
+                "category": { "type": "string", "enum": ["core", "daily", "conversation"] }
             }),
+            &["key", "content"],
         ),
         f(
             "memory_forget",
             "Delete a memory by key. Use this when something you stored turns out to be wrong, rather than storing a correction alongside it.",
-            json!({
-                "type": "object",
-                "properties": { "key": { "type": "string" } },
-                "required": ["key"]
-            }),
+            json!({ "key": { "type": "string" } }),
+            &["key"],
         ),
         f(
             "search_messages",
             "Search the full history of messages in this chat, for what someone actually said. memory_recall searches notes you chose to keep; this searches everything. Unquoted words are matched by meaning, so a message is found even when it used none of your words. Put a word in double quotes to require it exactly. The two combine, so 'fifa \"2025\" world cup' finds messages that definitely mention 2025, ranked by how much they are about the world cup.",
             json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Describe the subject; \"quoted\" words are required exactly" },
-                    "limit": { "type": "integer", "description": "Default 8" }
-                },
-                "required": ["query"]
+                "query": { "type": "string", "description": "Describe the subject; \"quoted\" words are required exactly" },
+                "limit": { "type": "integer", "description": "Default 8" }
             }),
+            &["query"],
         ),
         f(
             "send_message",
             "Send a message to the room right now, without ending your turn. Use this on a long task to say what you have found or what you are about to do, rather than working in silence. Your final answer is sent automatically, so do not repeat it here.",
-            json!({
-                "type": "object",
-                "properties": { "text": { "type": "string" } },
-                "required": ["text"]
-            }),
+            json!({ "text": { "type": "string" } }),
+            &["text"],
         ),
         f(
             "web_search",
             "Search the web for current information. Not a substitute for memory_recall: private things discussed in this chat will never appear here.",
             json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string" },
-                    "num_results": { "type": "integer", "description": "Default 5, max 10" }
-                },
-                "required": ["query"]
+                "query": { "type": "string" },
+                "num_results": { "type": "integer", "description": "Default 5, max 10" }
             }),
+            &["query"],
         ),
         f(
             "web_fetch",
             "Fetch a single web page and return it as plain text. Use web_search first if you do not already have the URL.",
-            json!({
-                "type": "object",
-                "properties": { "url": { "type": "string" } },
-                "required": ["url"]
-            }),
+            json!({ "url": { "type": "string" } }),
+            &["url"],
         ),
         f(
             "generate_image",
             "Generate an image from a text prompt and post it to the room.",
             json!({
-                "type": "object",
-                "properties": {
-                    "prompt": { "type": "string" },
-                    "model": { "type": "string", "description": "Optional override" }
-                },
-                "required": ["prompt"]
+                "prompt": { "type": "string" },
+                "model": { "type": "string", "description": "Optional override" }
             }),
+            &["prompt"],
         ),
         f(
             "write_file",
             "Write a file in the workspace, creating parent directories and replacing any existing content. Use edit_file to change part of a file you already have.",
             json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "content": { "type": "string" }
-                },
-                "required": ["path", "content"]
+                "path": { "type": "string" },
+                "content": { "type": "string" }
             }),
+            &["path", "content"],
         ),
         f(
             "edit_file",
             "Replace exact text in a file. Every edit is matched against the original file rather than against earlier edits, so pass several disjoint edits in one call instead of calling repeatedly. Each old_text must appear exactly once: include surrounding lines to make it unique, but no more than needed. Nothing is written unless every edit matches.",
             json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "edits": {
-                        "type": "array",
-                        "description": "Disjoint, non-overlapping replacements",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "old_text": { "type": "string", "description": "Exact text to replace, unique in the file" },
-                                "new_text": { "type": "string" }
-                            },
-                            "required": ["old_text", "new_text"]
-                        }
+                "path": { "type": "string" },
+                "edits": {
+                    "type": "array",
+                    "description": "Disjoint, non-overlapping replacements",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_text": { "type": "string", "description": "Exact text to replace, unique in the file" },
+                            "new_text": { "type": "string" }
+                        },
+                        "required": ["old_text", "new_text"]
                     }
-                },
-                "required": ["path", "edits"]
+                }
             }),
+            &["path", "edits"],
         ),
         f(
             "bash",
             "Run a bash script in your sandbox and return its output. It starts in the workspace, so files you wrote are there and anything it writes persists for later turns. You are root in there and it keeps what you install, so apk add, pip install and npm i all work. Reach python with python3, and the internet with curl. The LAN is unreachable and no secret is visible.",
-            json!({
-                "type": "object",
-                "properties": { "script": { "type": "string" } },
-                "required": ["script"]
-            }),
+            json!({ "script": { "type": "string" } }),
+            &["script"],
         ),
         f(
             "sql_query",
             "Run a read-only SQL query against merlin's database, which holds memories, the full message archive and the scheduled jobs in one file. Use this for counting, grouping, joining and any question the search tools do not shape well, such as who sends the most messages or what was stored in a given week.\n\nThe engine is SQLite. Only SQLite's own functions exist. Split text with a recursive CTE. Schema:\n\nmemories(id, key, content, category, room_id, created_at, updated_at)\nmessages(event_id, room_id, sender, body, at)\ncron_jobs(name, schedule, timezone, prompt, room_id, enabled, created_at, last_run, last_status)\n\nsender is a full Matrix ID including the leading @ and the homeserver, e.g. '@alice:example.org'. Run SELECT sender, count(*) FROM messages GROUP BY sender first and use the exact values.\n\nNote that curly and straight apostrophes are different characters, so one person's \"it's\" may not match another's; normalise with replace(body, char(8217), char(39)) when that matters.\n\nSELECT, WITH and EXPLAIN only; writes are refused. Use memory_store and cron_create to change things.",
             json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "A single SELECT, WITH or EXPLAIN statement" },
-                    "limit": { "type": "integer", "description": "Max rows returned, default 50" }
-                },
-                "required": ["query"]
+                "query": { "type": "string", "description": "A single SELECT, WITH or EXPLAIN statement" },
+                "limit": { "type": "integer", "description": "Max rows returned, default 50" }
             }),
+            &["query"],
         ),
         f(
             "cron_create",
             "Schedule a recurring job. The prompt runs as a normal turn at each firing and the result is posted to this room.",
             json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Unique short name" },
-                    "schedule": { "type": "string", "description": "5-field cron expression, e.g. '0 7 * * *'" },
-                    "prompt": { "type": "string", "description": "What to do when it fires" },
-                    "timezone": { "type": "string", "description": "IANA zone, defaults to the configured one" }
-                },
-                "required": ["name", "schedule", "prompt"]
+                "name": { "type": "string", "description": "Unique short name" },
+                "schedule": { "type": "string", "description": "5-field cron expression, e.g. '0 7 * * *'" },
+                "prompt": { "type": "string", "description": "What to do when it fires" },
+                "timezone": { "type": "string", "description": "IANA zone, defaults to the configured one" }
             }),
+            &["name", "schedule", "prompt"],
         ),
         f(
             "cron_delete",
             "Delete a scheduled job by name, stopping it from firing again.",
-            json!({
-                "type": "object",
-                "properties": { "name": { "type": "string" } },
-                "required": ["name"]
-            }),
+            json!({ "name": { "type": "string" } }),
+            &["name"],
         ),
     ]
 }
 
-fn f(name: &str, description: &str, parameters: Value) -> Value {
+fn f(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
         "type": "function",
-        "function": { "name": name, "description": description, "parameters": parameters }
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": { "type": "object", "properties": properties, "required": required }
+        }
     })
 }
 

@@ -1,11 +1,13 @@
 use anyhow::Result;
 use rapidfuzz::distance::jaro_winkler;
 use rusqlite::{Connection, params};
+use std::collections::BTreeSet;
 
 use crate::embed::{self, Messages};
 use crate::query::{Term, escape, parse, required_expr};
 
 const CANDIDATE_CAP: usize = 500;
+const MIN_SIMILARITY: f64 = 0.82;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Archived {
@@ -98,15 +100,17 @@ fn approximate(
 ) -> Result<Vec<Archived>> {
     let over = limit.saturating_mul(8).max(40);
     let candidates = if exact.is_empty() {
-        let mut grams: Vec<String> = Vec::new();
-        for term in loose {
-            for window in term.text.chars().collect::<Vec<_>>().windows(3) {
-                let gram: String = window.iter().collect();
-                if !grams.contains(&gram) {
-                    grams.push(gram);
-                }
-            }
-        }
+        let grams: BTreeSet<String> = loose
+            .iter()
+            .flat_map(|t| {
+                t.text
+                    .chars()
+                    .collect::<Vec<_>>()
+                    .windows(3)
+                    .map(|w| w.iter().collect())
+                    .collect::<Vec<String>>()
+            })
+            .collect();
         if grams.is_empty() {
             return Ok(Vec::new());
         }
@@ -120,13 +124,16 @@ fn approximate(
         from_index(conn, "messages_fts", &required_expr(exact), over)?
     };
 
-    let words: Vec<String> = loose.iter().map(|t| t.text.clone()).collect();
+    let matchers: Vec<jaro_winkler::BatchComparator<char>> = loose
+        .iter()
+        .map(|t| jaro_winkler::BatchComparator::new(t.text.chars()))
+        .collect();
     let mut scored: Vec<(f64, Archived)> = candidates
         .into_iter()
-        .map(|(_, row)| (best_similarity(&words, &row.body), row))
-        .filter(|(score, _)| *score >= 0.82)
+        .map(|(_, row)| (best_similarity(&matchers, &row.body), row))
+        .filter(|(score, _)| *score >= MIN_SIMILARITY)
         .collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
     let ranked: Vec<Archived> = scored.into_iter().take(limit).map(|(_, r)| r).collect();
 
     if ranked.is_empty() && !exact.is_empty() {
@@ -165,16 +172,20 @@ fn from_index(
         .collect::<Result<Vec<_>, _>>()?)
 }
 
-fn best_similarity(terms: &[String], body: &str) -> f64 {
-    body.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
-        .flat_map(|word| {
-            terms
-                .iter()
-                .map(move |term| jaro_winkler::similarity(term.chars(), word.chars()))
-        })
-        .fold(0.0_f64, f64::max)
+fn best_similarity(matchers: &[jaro_winkler::BatchComparator<char>], body: &str) -> f64 {
+    let mut best = 0.0_f64;
+    for word in body.split(|c: char| !c.is_alphanumeric()) {
+        if word.is_empty() {
+            continue;
+        }
+        for matcher in matchers {
+            best = best.max(matcher.similarity(word.chars().flat_map(char::to_lowercase)));
+            if best == 1.0 {
+                return best;
+            }
+        }
+    }
+    best
 }
 
 fn to_archived(r: &rusqlite::Row<'_>) -> rusqlite::Result<Archived> {

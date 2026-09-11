@@ -30,25 +30,15 @@ impl Buffers {
         }
     }
 
-    pub fn context(&self, room_id: &str) -> Vec<Turn> {
-        self.inner
-            .lock()
-            .unwrap()
-            .get(room_id)
-            .cloned()
-            .unwrap_or_default()
-    }
-
     pub fn render(&self, room_id: &str, skip_last: bool) -> Option<String> {
-        let mut turns = self.context(room_id);
-        if skip_last {
-            turns.pop();
-        }
-        if turns.is_empty() {
+        let map = self.inner.lock().unwrap();
+        let turns = map.get(room_id)?;
+        let keep = turns.len().saturating_sub(usize::from(skip_last));
+        if keep == 0 {
             return None;
         }
         Some(
-            turns
+            turns[..keep]
                 .iter()
                 .map(|t| format!("{}: {}", t.sender, t.body))
                 .collect::<Vec<_>>()

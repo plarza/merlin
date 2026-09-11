@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::sync::{Mutex, Once};
 use std::time::Duration;
 
@@ -269,18 +270,31 @@ pub fn rank<E: Embeddable, T>(
     vector: &[f32],
     limit: usize,
 ) -> Result<Vec<T>> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let places = std::iter::repeat_n("?", candidates.len())
+        .collect::<Vec<_>>()
+        .join(",");
     let mut stmt = conn.prepare(&format!(
-        "SELECT embedding FROM {} WHERE {} = ?1",
+        "SELECT {}, embedding FROM {} WHERE {} IN ({places})",
+        E::KEY,
         E::TABLE,
         E::KEY
     ))?;
+    let stored: HashMap<i64, Vec<f32>> = stmt
+        .query_map(
+            rusqlite::params_from_iter(candidates.iter().map(|(id, _)| *id)),
+            |r| Ok((r.get(0)?, from_blob(&r.get::<_, Vec<u8>>(1)?))),
+        )?
+        .collect::<Result<_, _>>()?;
 
-    let mut scored: Vec<(f32, T)> = Vec::new();
-    let mut unscored: Vec<T> = Vec::new();
+    let query_norm = norm(vector);
+    let (mut scored, mut unscored) = (Vec::new(), Vec::new());
     for (id, row) in candidates {
-        let blob: Option<Vec<u8>> = stmt.query_row(params![id], |r| r.get(0)).optional()?;
-        match blob {
-            Some(b) => scored.push((cosine(vector, &from_blob(&b)), row)),
+        match stored.get(&id) {
+            Some(v) => scored.push((cosine(vector, query_norm, v), row)),
             None => unscored.push(row),
         }
     }
@@ -288,7 +302,7 @@ pub fn rank<E: Embeddable, T>(
     if scored.is_empty() {
         return Ok(Vec::new());
     }
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
 
     let mut out: Vec<T> = scored.into_iter().map(|(_, r)| r).collect();
     out.extend(unscored);
@@ -296,17 +310,16 @@ pub fn rank<E: Embeddable, T>(
     Ok(out)
 }
 
-pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
-    for (x, y) in a.iter().zip(b) {
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
-    }
-    if na == 0.0 || nb == 0.0 {
+fn norm(v: &[f32]) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
+fn cosine(a: &[f32], a_norm: f32, b: &[f32]) -> f32 {
+    let b_norm = norm(b);
+    if a_norm == 0.0 || b_norm == 0.0 {
         return 0.0;
     }
-    dot / (na.sqrt() * nb.sqrt())
+    a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>() / (a_norm * b_norm)
 }
 
 fn to_blob(v: &[f32]) -> Vec<u8> {
@@ -356,9 +369,8 @@ async fn drain<E: Embeddable>(
         return Ok(0);
     }
 
-    let texts: Vec<String> = work.iter().map(|(_, t)| t.clone()).collect();
-    let vectors = embedder.embed(&texts).await?;
-    let rows: Vec<(i64, Vec<f32>)> = work.iter().map(|(id, _)| *id).zip(vectors).collect();
+    let (ids, texts): (Vec<i64>, Vec<String>) = work.into_iter().unzip();
+    let rows: Vec<(i64, Vec<f32>)> = ids.into_iter().zip(embedder.embed(&texts).await?).collect();
 
     save::<E>(&mut db.lock().unwrap(), &rows)
 }

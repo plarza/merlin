@@ -137,16 +137,7 @@ impl Secrets {
 }
 
 fn req(key: &str) -> Result<String> {
-    std::env::var(key)
-        .with_context(|| format!("{key} must be set in the environment"))
-        .map(|v| v.trim().to_string())
-        .and_then(|v| {
-            if v.is_empty() {
-                anyhow::bail!("{key} is set but empty")
-            } else {
-                Ok(v)
-            }
-        })
+    opt(key).with_context(|| format!("{key} must be set in the environment and not be empty"))
 }
 
 fn list_from_env(key: &str) -> Option<Vec<String>> {
