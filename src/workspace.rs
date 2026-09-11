@@ -58,6 +58,36 @@ impl Workspace {
         Ok(out)
     }
 
+    /// Store a file received in the room, under `inbox/`, and return its workspace-relative path.
+    ///
+    /// The bytes are written and nothing else. Nothing is parsed and nothing is sent to the model,
+    /// which is the point: a document is available to read with the shell if the agent decides it needs to, and costs nothing if it does not.
+    pub fn save_incoming(&self, filename: &str, bytes: &[u8]) -> Result<String> {
+        let safe: String = filename
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || "._-".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let safe = if safe.trim_matches('_').is_empty() {
+            "attachment".to_string()
+        } else {
+            safe
+        };
+
+        let relative = format!("inbox/{safe}");
+        let full = self.resolve(&relative)?;
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&full, bytes).with_context(|| format!("writing {relative}"))?;
+        Ok(relative)
+    }
+
     pub fn write(&self, path: &str, content: &str) -> Result<String> {
         let full = self.resolve(path)?;
         if let Some(parent) = full.parent() {

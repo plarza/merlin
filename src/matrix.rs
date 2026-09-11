@@ -21,11 +21,56 @@ use crate::config::{Config, Secrets};
 use crate::llm::Attachment;
 use crate::room::{Buffers, Turn, is_addressed};
 
+/// A file that arrived with a message.
+struct Attached {
+    source: mxlink::matrix_sdk::ruma::events::room::MediaSource,
+    name: String,
+    media_type: Option<String>,
+    /// Whether the model can look at it, which in practice means an image.
+    viewable: bool,
+}
+
+/// The body to record, and the file to fetch if a turn runs.
+///
+/// Every attachment takes the same path, because an image is a file too: all of them land in the workspace,
+/// and an image is additionally handed to the model, which is the one thing it can do with bytes directly.
+/// `None` means a message type the bot does not handle at all.
+fn extract(msgtype: &MessageType) -> Option<(String, Option<Attached>)> {
+    let file = |name: &str, source, media_type, viewable| {
+        let name = name.trim().to_string();
+        Some((
+            format!("[file] {name}"),
+            Some(Attached {
+                source,
+                name,
+                media_type,
+                viewable,
+            }),
+        ))
+    };
+
+    match msgtype {
+        MessageType::Text(m) => Some((m.body.trim().to_string(), None)),
+        // Only an image carries its media type onward, since only an image is sent as bytes.
+        MessageType::Image(m) => file(
+            &m.body,
+            m.source.clone(),
+            m.info.as_ref().and_then(|i| i.mimetype.clone()),
+            true,
+        ),
+        MessageType::File(m) => file(&m.body, m.source.clone(), None, false),
+        MessageType::Video(m) => file(&m.body, m.source.clone(), None, false),
+        MessageType::Audio(m) => file(&m.body, m.source.clone(), None, false),
+        _ => None,
+    }
+}
+
 pub struct Bot {
     pub link: MatrixLink,
     pub agent: Arc<Agent>,
     pub buffers: Arc<Buffers>,
     pub db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    pub workspace: Arc<crate::workspace::Workspace>,
     pub config: Arc<Config>,
 }
 
@@ -98,56 +143,66 @@ impl Bot {
             return Ok(());
         }
 
-        // An image carries its filename or caption as the body, which is what a
-        // person sees, so it reads sensibly in the archive and the buffer too.
-        let (body, image) = match &event.content.msgtype {
-            MessageType::Text(text) => (text.body.trim().to_string(), None),
-            MessageType::Image(image) => (
-                format!("[image] {}", image.body.trim()),
-                Some((
-                    image.source.clone(),
-                    image.info.as_ref().and_then(|i| i.mimetype.clone()),
-                )),
-            ),
-            // Other attachment types are noted but not fetched: the model
-            // cannot read them, and the note is enough for it to respond.
-            MessageType::File(file) => (format!("[file] {}", file.body.trim()), None),
-            MessageType::Video(video) => (format!("[video] {}", video.body.trim()), None),
-            MessageType::Audio(audio) => (format!("[audio] {}", audio.body.trim()), None),
-            _ => return Ok(()),
+        let Some((body, attached)) = extract(&event.content.msgtype) else {
+            return Ok(());
         };
         if body.is_empty() {
             return Ok(());
         }
 
         let sender = event.sender.to_string();
+        self.remember(&event, &room_id, &sender, &body);
 
-        // Buffer first, unconditionally.
-        // Ambient context is the point: every message is retained, and only addressing decides whether a turn runs.
+        let reply_parent = self.reply_parent(&room, &event).await;
+        if !self.should_answer(&event, &body, &sender, reply_parent.as_ref()) {
+            return Ok(());
+        }
+
+        self.answer(
+            room,
+            room_id,
+            sender,
+            body,
+            attached,
+            reply_parent.map(|(_, body)| body),
+        )
+        .await
+    }
+
+    /// Buffer and archive every message, whether or not it was addressed to the bot.
+    /// Ambient context is the point: addressing decides only whether a turn runs.
+    fn remember(
+        &self,
+        event: &OriginalSyncRoomMessageEvent,
+        room_id: &str,
+        sender: &str,
+        body: &str,
+    ) {
         self.buffers.push(
-            &room_id,
+            room_id,
             Turn {
-                sender: sender.clone(),
-                body: body.clone(),
+                sender: sender.to_string(),
+                body: body.to_string(),
             },
         );
 
-        // Archived unconditionally, so history is searchable whether or not the bot was addressed.
+        let at = chrono::Utc::now().to_rfc3339();
+        let conn = self.db.lock().unwrap();
+        if let Err(e) =
+            crate::messages::record(&conn, event.event_id.as_str(), room_id, sender, body, &at)
         {
-            let at = chrono::Utc::now().to_rfc3339();
-            let conn = self.db.lock().unwrap();
-            if let Err(e) = crate::messages::record(
-                &conn,
-                event.event_id.as_str(),
-                &room_id,
-                &sender,
-                &body,
-                &at,
-            ) {
-                tracing::warn!(error = %e, "failed archiving message");
-            }
+            tracing::warn!(error = %e, "failed archiving message");
         }
+    }
 
+    /// Whether this message should start a turn.
+    fn should_answer(
+        &self,
+        event: &OriginalSyncRoomMessageEvent,
+        body: &str,
+        sender: &str,
+        reply_parent: Option<&(String, String)>,
+    ) -> bool {
         let mentions: Vec<String> = event
             .content
             .mentions
@@ -155,13 +210,10 @@ impl Bot {
             .map(|m| m.user_ids.iter().map(|u| u.to_string()).collect())
             .unwrap_or_default();
 
-        let reply_parent = self.reply_parent(&room, &event).await;
-        let is_reply_to_bot = reply_parent
-            .as_ref()
-            .is_some_and(|(sender, _)| sender == &self.config.user_id);
+        let is_reply_to_bot = reply_parent.is_some_and(|(from, _)| from == &self.config.user_id);
 
         if !is_addressed(
-            &body,
+            body,
             &mentions,
             &self.config.user_id,
             self.config.localpart(),
@@ -169,30 +221,42 @@ impl Bot {
             is_reply_to_bot,
         ) {
             tracing::debug!(%sender, "not addressed; buffered only");
-            return Ok(());
+            return false;
         }
 
         // Addressed, but by someone who may not drive the bot.
         // Their message still counts as context, they just cannot start a turn.
-        if !self.config.is_allowed_sender(&sender) {
+        if !self.config.is_allowed_sender(sender) {
             tracing::info!(%sender, "addressed by a sender who is not allowed");
-            return Ok(());
+            return false;
         }
+        true
+    }
 
+    /// Run one turn and report the result to the room.
+    async fn answer(
+        self: &Arc<Self>,
+        room: Room,
+        room_id: String,
+        sender: String,
+        body: String,
+        attached: Option<Attached>,
+        reply_parent: Option<String>,
+    ) -> Result<()> {
         // The buffer already contains this message; the turn passes it separately, so drop the last entry from the ambient block.
         let ambient = self.buffers.render(&room_id, true);
 
         tracing::info!(%sender, chars = body.len(), "turn started");
         let started = std::time::Instant::now();
 
-        // Fetched only for a turn that will actually run, so ambient images cost nothing.
-        let attachments = match image {
-            Some((source, mimetype)) => self.fetch_image(&room, source, mimetype).await,
+        // Fetched only for a turn that will actually run, so an attachment nobody asked about costs nothing.
+        let mut body = body;
+        let attachments = match attached {
+            Some(file) => self.receive(&room, file, &mut body).await,
             None => Vec::new(),
         };
 
-        let typing = room.typing_notice(true).await;
-        if typing.is_err() {
+        if room.typing_notice(true).await.is_err() {
             tracing::debug!("could not send typing notice");
         }
 
@@ -219,24 +283,23 @@ impl Bot {
                     sender: &sender,
                     body: &body,
                     ambient,
-                    reply_parent: reply_parent.map(|(_, body)| body),
+                    reply_parent,
                     attachments,
                 },
                 Some(&progress),
             )
             .await;
 
-        // Closing the channel and waiting for the pump guarantees every update
-        // has landed before the final answer follows it.
+        // Closing the channel and waiting for the pump guarantees every update has landed before the final answer follows it.
         drop(progress);
         let _ = pump.await;
-
         let _ = room.typing_notice(false).await;
 
+        let ms = started.elapsed().as_millis() as u64;
         match result {
             Ok(turn) => {
                 tracing::info!(
-                    ms = started.elapsed().as_millis() as u64,
+                    ms,
                     reply_chars = turn.text.len(),
                     images = turn.images.len(),
                     prompt_tokens = turn.prompt_tokens,
@@ -258,15 +321,10 @@ impl Bot {
                 }
             }
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    ms = started.elapsed().as_millis() as u64,
-                    "turn failed"
-                );
+                tracing::warn!(error = %e, ms, "turn failed");
                 self.send_text(&room, &format!("that failed: {e}")).await?;
             }
         }
-
         Ok(())
     }
 
@@ -291,43 +349,51 @@ impl Bot {
             .with_context(|| format!("not joined to room {room_id}"))
     }
 
-    /// Download and decrypt an image so the model can look at it.
-    /// Oversized images are skipped rather than truncated, since a partial image is worse than none.
-    async fn fetch_image(
-        &self,
-        room: &Room,
-        source: mxlink::matrix_sdk::ruma::events::room::MediaSource,
-        mimetype: Option<String>,
-    ) -> Vec<Attachment> {
-        const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
-
+    /// Download an attachment once, keep it in the workspace, and hand back
+    /// anything the model can look at directly.
+    ///
+    /// The saved path is appended to the message body, so the agent knows the file is there and can open it with the shell if it decides the contents matter.
+    /// Nothing is parsed here: a PDF costs nothing until it is read.
+    async fn receive(&self, room: &Room, file: Attached, body: &mut String) -> Vec<Attachment> {
         let request = MediaRequestParameters {
-            source,
+            source: file.source,
             format: MediaFormat::File,
         };
 
-        match room
+        let bytes = match room
             .client()
             .media()
             .get_media_content(&request, true)
             .await
         {
-            Ok(bytes) if bytes.len() <= MAX_IMAGE_BYTES => {
-                tracing::info!(bytes = bytes.len(), "attachment fetched");
-                vec![Attachment {
-                    bytes,
-                    media_type: mimetype.unwrap_or_else(|| "image/png".to_string()),
-                }]
-            }
-            Ok(bytes) => {
-                tracing::warn!(bytes = bytes.len(), "attachment over size cap, skipping");
-                Vec::new()
-            }
+            Ok(bytes) => bytes,
             Err(e) => {
                 tracing::warn!(error = %e, "could not fetch attachment");
-                Vec::new()
+                return Vec::new();
             }
+        };
+
+        if bytes.len() > self.config.limits.max_response_bytes {
+            tracing::warn!(bytes = bytes.len(), "attachment over the size cap");
+            body.push_str(&format!(" (too large to save, {} bytes)", bytes.len()));
+            return Vec::new();
         }
+
+        match self.workspace.save_incoming(&file.name, &bytes) {
+            Ok(path) => {
+                tracing::info!(%path, bytes = bytes.len(), viewable = file.viewable, "attachment saved");
+                body.push_str(&format!(" (saved at {path})"));
+            }
+            Err(e) => tracing::warn!(error = %e, "could not save attachment"),
+        }
+
+        if !file.viewable {
+            return Vec::new();
+        }
+        vec![Attachment {
+            bytes,
+            media_type: file.media_type.unwrap_or_else(|| "image/png".to_string()),
+        }]
     }
 
     /// Sender and body of the message being replied to, when there is one.

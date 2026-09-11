@@ -1,8 +1,10 @@
 //! merlin — a Matrix assistant.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use rusqlite::Connection;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use merlin::agent::Agent;
 use merlin::config::{Config, Secrets};
@@ -10,9 +12,10 @@ use merlin::embed::{Embedder, Memories, Messages};
 use merlin::exec::Sandbox;
 use merlin::llm::Llm;
 use merlin::matrix::Bot;
-use merlin::room::Buffers;
+use merlin::room::{Buffers, Turn};
 use merlin::tools::Tools;
 use merlin::workspace::Workspace;
+use merlin::{backfill, db, embed, matrix, memory, messages, scheduler};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,207 +26,268 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let mut args = std::env::args().skip(1);
-    let mut config_path = PathBuf::from("/var/lib/merlin/config.toml");
-    let mut import_from: Option<PathBuf> = None;
-    let mut backfill_pages: Option<usize> = None;
-    let mut import_keys: Option<PathBuf> = None;
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--config" => config_path = args.next().context("--config needs a path")?.into(),
-            "--import-memories" => {
-                import_from = Some(
-                    args.next()
-                        .context("--import-memories needs a path")?
-                        .into(),
-                )
-            }
-            "--import-keys" => {
-                import_keys = Some(args.next().context("--import-keys needs a path")?.into())
-            }
-            "--backfill" => {
-                let pages = args.next().unwrap_or_else(|| "50".into());
-                backfill_pages = Some(pages.parse().context("--backfill needs a page count")?);
-            }
-            other => anyhow::bail!("unknown argument '{other}'"),
-        }
-    }
-
-    let config = Arc::new(Config::load(&config_path)?);
+    let args = Args::parse()?;
+    let config = Arc::new(Config::load(&args.config)?);
     let db_path = config.state_dir.join("merlin.db");
 
-    // Import is a one-shot maintenance mode, not part of startup: it runs against the same schema the bot uses and then exits, so the result can be verified before anything goes live.
-    if let Some(legacy) = import_from {
-        let mut conn = merlin::db::open(&db_path)?;
-        let before = merlin::memory::count(&conn)?;
-        let taken = merlin::memory::import_legacy(&mut conn, &legacy)?;
-        println!(
-            "imported {taken} rows ({before} -> {} total)",
-            merlin::memory::count(&conn)?
-        );
-        return Ok(());
+    // Importing memories touches nothing but the database, so it runs before any
+    // credential is read or any session is opened.
+    if let Some(legacy) = &args.import_memories {
+        return import_memories(&db_path, legacy);
     }
 
     let secrets = Secrets::from_env()?;
+    let db = open_database(&db_path, &config.state_dir)?;
+    let runtime = Runtime::build(&config, &secrets, db)?;
 
-    let soul = std::fs::read_to_string(config.state_dir.join("SOUL.md")).unwrap_or_else(|_| {
-        tracing::warn!("no SOUL.md found; running without a persona");
-        String::new()
-    });
+    let link = matrix::connect(&config, &secrets).await?;
+    tracing::info!(user = %config.user_id, "connected");
 
-    let mut conn = merlin::db::open(&db_path)?;
-    match merlin::db::migrate_from_split_files(&mut conn, &config.state_dir)? {
+    // The remaining one-shot modes need a session but not a running bot.
+    if let Some(path) = &args.import_keys {
+        return import_keys(&link, path).await;
+    }
+    if let Some(pages) = args.backfill {
+        return backfill_history(&link, &config, &runtime.db, pages).await;
+    }
+
+    runtime.run(link, config).await
+}
+
+/// Command line, parsed once.
+#[derive(Default)]
+struct Args {
+    config: PathBuf,
+    import_memories: Option<PathBuf>,
+    import_keys: Option<PathBuf>,
+    backfill: Option<usize>,
+}
+
+impl Args {
+    fn parse() -> Result<Self> {
+        let mut args = Args {
+            config: PathBuf::from("/var/lib/merlin/config.toml"),
+            ..Default::default()
+        };
+        let mut raw = std::env::args().skip(1);
+
+        while let Some(arg) = raw.next() {
+            let mut value =
+                |flag: &str| raw.next().with_context(|| format!("{flag} needs a value"));
+            match arg.as_str() {
+                "--config" => args.config = value("--config")?.into(),
+                "--import-memories" => {
+                    args.import_memories = Some(value("--import-memories")?.into())
+                }
+                "--import-keys" => args.import_keys = Some(value("--import-keys")?.into()),
+                "--backfill" => {
+                    args.backfill = Some(
+                        raw.next()
+                            .unwrap_or_else(|| "50".into())
+                            .parse()
+                            .context("--backfill needs a page count")?,
+                    )
+                }
+                other => anyhow::bail!("unknown argument '{other}'"),
+            }
+        }
+        Ok(args)
+    }
+}
+
+/// Everything built once at startup and shared for the life of the process.
+struct Runtime {
+    db: Arc<Mutex<Connection>>,
+    agent: Arc<Agent>,
+    embedder: Arc<Embedder>,
+    workspace: Arc<Workspace>,
+}
+
+impl Runtime {
+    fn build(config: &Arc<Config>, secrets: &Secrets, db: Arc<Mutex<Connection>>) -> Result<Self> {
+        let llm = Arc::new(Llm::new(
+            secrets.openrouter_api_key.clone(),
+            config.model.chat.clone(),
+            config.model.image.clone(),
+            config.model.reasoning_effort.clone(),
+            config.limits.request_timeout_s,
+        )?);
+
+        let embedder = Arc::new(Embedder::new(
+            secrets.openrouter_api_key.clone(),
+            config.model.embedding.clone(),
+            config.model.embedding_dimensions,
+            config.limits.request_timeout_s,
+        )?);
+
+        {
+            let conn = db.lock().unwrap();
+            embed::ensure_table::<Memories>(&conn, embedder.model(), embedder.dimensions())?;
+            embed::ensure_table::<Messages>(&conn, embedder.model(), embedder.dimensions())?;
+            tracing::info!(
+                model = embedder.model(),
+                dimensions = embedder.dimensions(),
+                memories = embed::count_pending::<Memories>(&conn)?,
+                messages = embed::count_pending::<Messages>(&conn)?,
+                "semantic index ready"
+            );
+        }
+
+        // Deliberately outside the 0700 state directory: the sandbox uid shares
+        // this directory and must not gain a foothold beside the database.
+        let workspace = Arc::new(Workspace::new(workspace_dir())?);
+        tracing::info!(path = %workspace.root().display(), "workspace ready");
+
+        let tools = Arc::new(Tools {
+            db: Arc::clone(&db),
+            workspace: Arc::clone(&workspace),
+            sandbox: Arc::new(Sandbox::new(
+                exec_runner(),
+                config.limits.exec_timeout_s,
+                config.limits.exec_memory_max.clone(),
+            )),
+            llm: Arc::clone(&llm),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(config.limits.request_timeout_s))
+                .build()?,
+            exa_key: secrets.exa_api_key.clone(),
+            embedder: Arc::clone(&embedder),
+            config: Arc::clone(config),
+        });
+
+        let agent = Arc::new(Agent {
+            llm,
+            tools,
+            soul: soul(&config.state_dir),
+            max_iterations: config.limits.tool_iterations,
+            max_duration: Duration::from_secs(config.limits.turn_timeout_s),
+            timezone: config.tz(),
+        });
+
+        Ok(Self {
+            db,
+            agent,
+            embedder,
+            workspace,
+        })
+    }
+
+    async fn run(self, link: mxlink::MatrixLink, config: Arc<Config>) -> Result<()> {
+        tokio::spawn(embed::run(
+            self.embedder,
+            Arc::clone(&self.db),
+            config.limits.embed_batch,
+        ));
+
+        let bot = Arc::new(Bot {
+            link,
+            agent: Arc::clone(&self.agent),
+            buffers: seed_buffers(&self.db, &config),
+            db: Arc::clone(&self.db),
+            workspace: self.workspace,
+            config: Arc::clone(&config),
+        });
+
+        // Started before sync so a job due at boot is not missed.
+        scheduler::start(self.db, self.agent, Arc::clone(&bot), config).await?;
+        bot.run().await
+    }
+}
+
+fn open_database(path: &Path, state_dir: &Path) -> Result<Arc<Mutex<Connection>>> {
+    let mut conn = db::open(path)?;
+    match db::migrate_from_split_files(&mut conn, state_dir)? {
         0 => {}
         rows => tracing::info!(rows, "folded the old split databases into one"),
     }
     tracing::info!(
-        memories = merlin::memory::count(&conn)?,
-        messages = merlin::messages::count(&conn)?,
+        memories = memory::count(&conn)?,
+        messages = messages::count(&conn)?,
         "database ready"
     );
-    let db = Arc::new(Mutex::new(conn));
+    Ok(Arc::new(Mutex::new(conn)))
+}
 
-    let llm = Arc::new(Llm::new(
-        secrets.openrouter_api_key.clone(),
-        config.model.chat.clone(),
-        config.model.image.clone(),
-        config.model.reasoning_effort.clone(),
-        config.limits.request_timeout_s,
-    )?);
-
-    let embedder = Arc::new(Embedder::new(
-        secrets.openrouter_api_key.clone(),
-        config.model.embedding.clone(),
-        config.model.embedding_dimensions,
-        config.limits.request_timeout_s,
-    )?);
-
-    {
-        let conn = db.lock().unwrap();
-        merlin::embed::ensure_table::<Memories>(&conn, embedder.model(), embedder.dimensions())?;
-        merlin::embed::ensure_table::<Messages>(&conn, embedder.model(), embedder.dimensions())?;
-        tracing::info!(
-            model = embedder.model(),
-            dimensions = embedder.dimensions(),
-            memories = merlin::embed::count_pending::<Memories>(&conn)?,
-            messages = merlin::embed::count_pending::<Messages>(&conn)?,
-            "semantic index ready"
-        );
-    }
-
-    let sandbox = Arc::new(Sandbox::new(
-        exec_runner(),
-        config.limits.exec_timeout_s,
-        config.limits.exec_memory_max.clone(),
-    ));
-
-    // Deliberately outside the 0700 state directory: the sandbox uid shares this
-    // directory, and must not be given a foothold beside the databases.
-    let workspace = Arc::new(Workspace::new(workspace_dir())?);
-    tracing::info!(path = %workspace.root().display(), "workspace ready");
-
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(
-            config.limits.request_timeout_s,
-        ))
-        .build()?;
-
-    let tools = Arc::new(Tools {
-        db: Arc::clone(&db),
-        sandbox,
-        workspace,
-        llm: Arc::clone(&llm),
-        http,
-        exa_key: secrets.exa_api_key.clone(),
-        embedder: Arc::clone(&embedder),
-        config: Arc::clone(&config),
-    });
-
-    let agent = Arc::new(Agent {
-        llm,
-        tools,
-        soul,
-        max_iterations: config.limits.tool_iterations,
-        timezone: config.tz(),
-    });
-
-    let link = merlin::matrix::connect(&config, &secrets).await?;
-    tracing::info!(user = %config.user_id, "connected");
-
-    if let Some(path) = import_keys {
-        let passphrase = std::env::var("MATRIX_KEY_EXPORT_PASSPHRASE")
-            .context("MATRIX_KEY_EXPORT_PASSPHRASE must hold the passphrase used for the export")?;
-        let result = link
-            .client()
-            .encryption()
-            .import_room_keys(path, &passphrase)
-            .await
-            .map_err(|e| anyhow::anyhow!("importing room keys failed: {e}"))?;
-        println!(
-            "imported {} of {} room keys",
-            result.imported_count, result.total_count
-        );
-        return Ok(());
-    }
-
-    if let Some(pages) = backfill_pages {
-        // Sync once so the client has joined rooms and whatever keys the server will hand over before we start reading history.
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        let stats = merlin::backfill::run(&link, &config, &db, pages).await?;
-        println!("backfill: {stats}");
-        if stats.undecryptable > stats.archived {
-            println!(
-                "most events could not be decrypted: this device has no room keys for them. \
-                 Set up Secure Backup on the account and provide MATRIX_RECOVERY_PASSPHRASE, \
-                 or share keys to this device from a session that has them."
-            );
-        }
-        return Ok(());
-    }
-
-    tokio::spawn(merlin::embed::run(
-        embedder,
-        Arc::clone(&db),
-        config.limits.embed_batch,
-    ));
-
-    // Refill the ambient buffer from the archive, so a restart does not leave the bot blind to what was just said.
+/// Refill the ambient buffer from the archive, so a restart does not leave the bot blind to what was just said.
+fn seed_buffers(db: &Mutex<Connection>, config: &Config) -> Arc<Buffers> {
     let buffers = Arc::new(Buffers::new(config.context_window));
-    {
-        let conn = db.lock().unwrap();
-        for room_id in &config.allowed_rooms {
-            match merlin::messages::recent(&conn, room_id, config.context_window) {
-                Ok(rows) => {
-                    let seeded = rows.len();
-                    for row in rows {
-                        buffers.push(
-                            room_id,
-                            merlin::room::Turn {
-                                sender: row.sender,
-                                body: row.body,
-                            },
-                        );
-                    }
-                    tracing::info!(room = %room_id, seeded, "context restored");
+    let conn = db.lock().unwrap();
+
+    for room_id in &config.allowed_rooms {
+        match messages::recent(&conn, room_id, config.context_window) {
+            Ok(rows) => {
+                let seeded = rows.len();
+                for row in rows {
+                    buffers.push(
+                        room_id,
+                        Turn {
+                            sender: row.sender,
+                            body: row.body,
+                        },
+                    );
                 }
-                Err(e) => tracing::warn!(room = %room_id, error = %e, "could not restore context"),
+                tracing::info!(room = %room_id, seeded, "context restored");
             }
+            Err(e) => tracing::warn!(room = %room_id, error = %e, "could not restore context"),
         }
     }
+    buffers
+}
 
-    let bot = Arc::new(Bot {
-        link,
-        agent: Arc::clone(&agent),
-        buffers,
-        db: Arc::clone(&db),
-        config: Arc::clone(&config),
-    });
+fn soul(state_dir: &Path) -> String {
+    std::fs::read_to_string(state_dir.join("SOUL.md")).unwrap_or_else(|_| {
+        tracing::warn!("no SOUL.md found; running without a persona");
+        String::new()
+    })
+}
 
-    // Started before sync so a job due at boot is not missed.
-    merlin::scheduler::start(Arc::clone(&db), agent, Arc::clone(&bot)).await?;
+/// Import runs against the same schema the bot uses and then exits, so the result can be verified before anything goes live.
+fn import_memories(db_path: &Path, legacy: &Path) -> Result<()> {
+    let mut conn = db::open(db_path)?;
+    let before = memory::count(&conn)?;
+    let taken = memory::import_legacy(&mut conn, legacy)?;
+    println!(
+        "imported {taken} rows ({before} -> {} total)",
+        memory::count(&conn)?
+    );
+    Ok(())
+}
 
-    bot.run().await
+async fn import_keys(link: &mxlink::MatrixLink, path: &Path) -> Result<()> {
+    let passphrase = std::env::var("MATRIX_KEY_EXPORT_PASSPHRASE")
+        .context("MATRIX_KEY_EXPORT_PASSPHRASE must hold the passphrase used for the export")?;
+    let result = link
+        .client()
+        .encryption()
+        .import_room_keys(path.to_path_buf(), &passphrase)
+        .await
+        .map_err(|e| anyhow::anyhow!("importing room keys failed: {e}"))?;
+    println!(
+        "imported {} of {} room keys",
+        result.imported_count, result.total_count
+    );
+    Ok(())
+}
+
+async fn backfill_history(
+    link: &mxlink::MatrixLink,
+    config: &Config,
+    db: &Mutex<Connection>,
+    pages: usize,
+) -> Result<()> {
+    // Sync once so the client has joined rooms and whatever keys the server will hand over before we start reading history.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let stats = backfill::run(link, config, db, pages).await?;
+    println!("backfill: {stats}");
+
+    if stats.undecryptable > stats.archived {
+        println!(
+            "most events could not be decrypted: this device has no room keys for them. \
+             Set up Secure Backup on the account and provide MATRIX_RECOVERY_PASSPHRASE, \
+             or share keys to this device from a session that has them."
+        );
+    }
+    Ok(())
 }
 
 /// Where the agent's files live.
