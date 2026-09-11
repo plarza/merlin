@@ -5,11 +5,9 @@
   <source media="(prefers-color-scheme: dark)" srcset="docs/title-dark.svg">
   <img src="docs/title-light.svg" alt="merlin" width="300">
 </picture>
-
-*a pico openclaw for matrix*
 </div>
 
-
+a matrix agent in rust. memory, message search, scheduled jobs, and a persistent linux sandbox.
 
 ## tools
 
@@ -19,33 +17,40 @@
 | `memory_store` | `key`, `content`, `category` |
 | `memory_forget` | `key` |
 | `search_messages` | `query`, `limit` |
+| `sql_query` | `query`, `limit` |
 | `send_message` | `text` |
-| `read_file` | `path`, `offset`, `limit` |
 | `write_file` | `path`, `content` |
 | `edit_file` | `path`, `edits` |
-| `list_files` | `path` |
-| `grep_files` | `pattern`, `path` |
 | `run_code` | `language`, `source` |
 | `web_search` | `query`, `num_results` |
 | `web_fetch` | `url` |
 | `generate_image` | `prompt`, `model` |
 | `cron_create` | `name`, `schedule`, `prompt`, `timezone` |
 | `cron_delete` | `name` |
-| `sql_query` | `query`, `limit` |
 
-there is no HTTP tool, no clock tool and no listing tool. the sandbox has curl, and the current time is in the system prompt, so neither earns a line in every prompt.
+reading, listing, searching files, HTTP requests and the clock are shell commands in the sandbox. the current time is in the system prompt.
 
-`send_message` posts to the room mid-turn without ending it, so a long task reports progress instead of going quiet. the final answer is still sent automatically.
+`send_message` posts to the room mid-turn without ending it. the final answer is sent automatically.
+
+`edit_file` takes a list of replacements, each matched against the original file. an `old_text` that matches zero times or more than once fails the whole call, and nothing is written.
 
 ## storage
 
-one SQLite file, `merlin.db`, under the state directory.
+one SQLite file, `merlin.db`.
 
-`memories` holds notes the agent chose to keep, keyed uniquely so re-filing a subject revises that row rather than adding a near-duplicate. there is no agent or tenant foreign key, so renaming the bot needs no migration. `messages` holds every message, keyed by event id so a sync replay cannot duplicate one. `cron_jobs` holds scheduled jobs.
+```
+memories(id, key, content, category, room_id, created_at, updated_at)
+messages(event_id, room_id, sender, body, at)
+cron_jobs(name, schedule, timezone, prompt, room_id, enabled, created_at, last_run, last_status)
+```
 
-three FTS5 indexes cover them, one over memories and two over messages, one with the default tokenizer and one with trigram. two sqlite-vec virtual tables hold the embeddings, keyed by rowid, each recording the model and width it was built with. changing either discards the vectors and rebuilds them, since a vec0 table fixes its dimension at creation.
+`memories.key` is unique; storing an existing key updates that row. there is no agent or tenant column, so renaming the bot needs no migration. `messages.event_id` is the primary key, so a sync replay inserts nothing.
 
-these were three separate files until they were not. one file means a query can span them, which is what `sql_query` is for: the agent gets the schema and read-only SQL, so counting, grouping and joining are its problem rather than another tool. writes are refused by SQLite's own parser rather than by inspecting the text, so a comment or a CTE wrapping an update cannot slip past. an older deployment's three files are folded in on first start and renamed aside, never deleted.
+three FTS5 indexes: `memories_fts`, `messages_fts`, and `messages_trigram` with the trigram tokenizer. two sqlite-vec `vec0` tables hold embeddings keyed by rowid. `embedding_meta` records the model and width each was built with; changing either drops the table and re-embeds, since a `vec0` table fixes its dimension at creation.
+
+`sql_query` runs `SELECT`, `WITH` and `EXPLAIN` against this file. read-only is enforced by `sqlite3_stmt_readonly`, not by inspecting the string.
+
+memories, messages and jobs were three files before. on first start they are copied into `merlin.db` and renamed to `*.db.migrated`.
 
 ## search
 
@@ -55,15 +60,31 @@ world cup "2025"             2025 required, world cup matched by meaning
 moving the hardware          pure meaning, matches "relocating the machines"
 ```
 
-one syntax, borrowed from web search: a quoted term is a requirement, everything unquoted describes the subject.
+quoted terms are required and select the candidate set through `messages_fts`, ranked by BM25. the unquoted remainder is embedded and reorders that set by cosine distance. with nothing quoted, the vector search runs over the whole archive. with nothing unquoted, no embedding request is made.
 
-quoted terms select the candidate set through the default FTS5 index. the unquoted remainder is embedded and ranks that set by cosine distance in sqlite-vec. with nothing quoted the ranking runs over the whole archive; with nothing unquoted there is no embedding call at all and BM25 order stands.
+the two scores are not combined. BM25 ranks by term frequency, cosine by direction in embedding space; the quoted part decides eligibility, the unquoted part decides order.
 
-the two are never mixed into one score. BM25 ranks by term statistics and cosine ranks by direction in embedding space, so a weighted sum of them is a number that means nothing. instead each does the job it is good at: the quoted part decides what is eligible, the unquoted part decides what is best.
+cosine rather than dot product: Matryoshka truncation returns vectors that are not unit length.
 
-cosine is chosen over dot product because it ignores magnitude. Matryoshka truncation returns vectors that are not unit length, so ranking on direction alone removes a renormalisation step that would otherwise be silently wrong.
+a background loop embeds rows with no vector, newest first, in batches of `embed_batch`, and sleeps for 60s when there are none. writes do not wait on it. rows it has not reached fall back to trigram candidates ranked by Jaro-Winkler similarity (rapidfuzz), with a floor of 0.82.
 
-a background loop embeds whatever has no vector yet, newest first, and sleeps once it catches up. writes never wait on the network, which makes the initial backfill and steady state the same code path. until a row is embedded it is still reachable: the trigram index and Jaro-Winkler ranking from rapidfuzz remain as the fallback, so search degrades to approximate string matching rather than returning nothing.
+## sandbox
+
+`run_code` runs bash or python in a persistent Alpine root, via `sudo -u merlin-exec`.
+
+the process is uid 0 inside a user namespace and unprivileged outside it. `apk add`, `pip install` and `npm i` work and persist across turns.
+
+bubblewrap unshares every namespace except the network:
+
+- no host path is bound in; `/nix/store`, `/var/lib/merlin` and `/run/secrets` do not exist inside
+- `--cap-drop ALL`; `mount` fails as root
+- `--proc`, `--dev`; no block devices
+- RFC1918, loopback and link-local are rejected by iptables and ip6tables rules matching the `merlin-exec` uid
+- `ulimit -u 512`, `ulimit -f`, and `timeout --signal=KILL` at `exec_timeout_s`
+
+`/etc/resolv.conf` inside the sandbox points at 1.1.1.1 and 8.8.8.8. the host's resolver is a LAN address and LAN egress is rejected.
+
+the workspace is a separate directory, mode `2770` and group `merlin-work`, bind-mounted at `/work` and the working directory for `run_code`. `write_file` and `edit_file` act on the same directory. the Alpine root itself is `0700 merlin-exec`.
 
 ## scheduling
 
@@ -71,25 +92,7 @@ a background loop embeds whatever has no vector yet, newest first, and sleeps on
 cron_create(name="hn", schedule="0 7 * * *", prompt="post the top Hacker News stories")
 ```
 
-schedules are ordinary 5-field cron expressions with an IANA timezone, validated at creation. a reconcile loop picks up additions, edits and deletions within a minute. a firing job runs its prompt as a turn and posts the result to its room once.
-
-## sandbox
-
-`run_code` runs bash or python inside a persistent Alpine root, reached through `sudo -u merlin-exec`, a user that owns no files.
-
-the agent is **root inside its own root filesystem** and nothing else. `apk add`, `pip install` and `npm i` all work, and what it installs is still there next turn. that is the point: it can set up whatever it needs without anyone provisioning it.
-
-it is root through a user namespace, so outside the namespace the kernel sees an unprivileged uid. bubblewrap unshares every namespace except the network:
-
-- no host path is bound in at all, so `/nix/store`, `/var/lib/merlin` and `/run/secrets` are not merely unreadable, they do not exist in there
-- `--cap-drop ALL`, so mounting is refused even as root
-- only the safe `/dev` nodes; no block devices
-- RFC1918, loopback and link-local rejected by firewall rules matched on that uid, over both IPv4 and IPv6
-- `ulimit` on processes and file size, and killed at `exec_timeout_s`
-
-the sandbox resolves DNS through public resolvers rather than the host's, because the host's nameserver is a LAN address and the LAN is exactly what it is denied.
-
-the workspace is the one thing shared with the bot. it is a separate directory, group-owned and setgid, mounted at `/work` and the shell's starting directory, so `write_file` then `run_code` see the same tree. the sandbox's own operating system stays private to the sandbox uid.
+5-field cron expressions with an IANA timezone, validated on creation. a reconcile loop polls `cron_jobs` every 60s and adds, replaces or removes scheduler entries. a firing job runs its prompt as a turn and posts the result to its room.
 
 ## configuration
 
@@ -104,24 +107,28 @@ context_window  = 64
 timezone        = "Australia/Sydney"
 
 [model]
-chat       = "z-ai/glm-5.3-flash"
-reasoning_effort = "low"
-image      = "meta/muse-image"
-embedding  = "google/gemini-embedding-001"
+chat                 = "z-ai/glm-5.3-flash"
+reasoning_effort     = "low"
+image                = "meta/muse-image"
+embedding            = "google/gemini-embedding-001"
 embedding_dimensions = 768
 
 [limits]
 max_response_bytes = 8388608
 tool_iterations    = 32
 request_timeout_s  = 120
-exec_timeout_s     = 60
+exec_timeout_s     = 300
 exec_memory_max    = "1G"
 embed_batch        = 32
 ```
 
-both allowlists fail closed: empty means none, and the process refuses to start.
+both allowlists fail closed: empty means none and the process exits.
 
-credentials come from the environment only, since the config file is rendered world-readable into the Nix store.
+`reasoning_effort` maps to OpenRouter's `reasoning.effort`. omitting it or setting `"default"` sends no field.
+
+`request_timeout_s` is a read timeout between chunks, not a deadline on the response. completions are streamed.
+
+credentials come from the environment. the config file is rendered world-readable into the Nix store.
 
 | variable | required |
 | --- | --- |
@@ -132,13 +139,13 @@ credentials come from the environment only, since the config file is rendered wo
 | `MERLIN_ALLOWED_ROOMS`, `MERLIN_ALLOWED_SENDERS` | override the config file |
 | `MERLIN_EXEC_RUNNER` | override the sandbox command |
 
-`SOUL.md` beside the config is injected into the system prompt every turn.
+`SOUL.md` beside the config is prepended to the system prompt.
 
 ## encryption
 
-Matrix and E2EE come from mxlink over matrix-rust-sdk. the session is persisted and encrypted at rest with a key derived from the Matrix password.
+matrix and E2EE come from mxlink over matrix-rust-sdk. the session blob is encrypted at rest with a key derived from `MATRIX_PASSWORD`.
 
-a device holds room keys only for messages sent after it existed. `--import-keys` loads a key export from a client that already holds them, with the passphrase in `MATRIX_KEY_EXPORT_PASSPHRASE`, which is what makes older history readable.
+a device holds room keys only for messages sent after it existed. `--import-keys` loads a key export from a client that has them, using `MATRIX_KEY_EXPORT_PASSPHRASE`.
 
 ## running
 
@@ -165,7 +172,9 @@ services.merlin = {
 };
 ```
 
-the module creates the `merlin` and `merlin-exec` users, a `0700` state directory, the sudo rule for the sandbox, and the firewall rules denying it LAN access.
+the module creates the `merlin`, `merlin-exec` and `merlin-work` accounts, a `0700` state directory, the workspace, the sudo rule, the firewall rules, and a oneshot that unpacks the Alpine root.
+
+builds run in GitHub Actions and are pushed to a Cachix cache; the host substitutes rather than compiles. crane splits dependency compilation from the crate, so a source change does not rebuild the dependency graph.
 
 ## tests
 
