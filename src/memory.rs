@@ -2,9 +2,8 @@
 //!
 //! Flat by design: no agent or tenant foreign key, so renaming the bot does not orphan its records.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
-use std::path::Path;
 
 use crate::embed::{self, Memories};
 use crate::query::{Term, loose_text, parse, required_expr};
@@ -179,40 +178,4 @@ fn to_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
         category: r.get(2)?,
         created_at: r.get(3)?,
     })
-}
-
-/// One-shot import from a compatible table, dropping any `agent_id`.
-/// Returns how many rows were taken.
-pub fn import_legacy(conn: &mut Connection, legacy: &Path) -> Result<usize> {
-    let src = Connection::open(legacy)
-        .with_context(|| format!("opening legacy db at {}", legacy.display()))?;
-    let mut stmt =
-        src.prepare("SELECT id, key, content, category, created_at, updated_at FROM memories")?;
-    let rows: Vec<(String, String, String, String, String, String)> = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let tx = conn.transaction()?;
-    let mut taken = 0usize;
-    for (id, key, content, category, created, updated) in rows {
-        // The legacy table allows duplicate keys across agents; ours does not.
-        // Skipping a collision keeps the first, which is the older.
-        taken += tx.execute(
-            "INSERT OR IGNORE INTO memories
-               (id, key, content, category, room_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
-            params![id, key, content, category, created, updated],
-        )?;
-    }
-    tx.commit()?;
-    Ok(taken)
 }

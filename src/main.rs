@@ -30,12 +30,6 @@ async fn main() -> Result<()> {
     let config = Arc::new(Config::load(&args.config)?);
     let db_path = config.state_dir.join("merlin.db");
 
-    // Importing memories touches nothing but the database, so it runs before any
-    // credential is read or any session is opened.
-    if let Some(legacy) = &args.import_memories {
-        return import_memories(&db_path, legacy);
-    }
-
     let secrets = Secrets::from_env()?;
     let db = open_database(&db_path, &config.state_dir)?;
     let runtime = Runtime::build(&config, &secrets, db)?;
@@ -58,7 +52,6 @@ async fn main() -> Result<()> {
 #[derive(Default)]
 struct Args {
     config: PathBuf,
-    import_memories: Option<PathBuf>,
     import_keys: Option<PathBuf>,
     backfill: Option<usize>,
 }
@@ -76,9 +69,6 @@ impl Args {
                 |flag: &str| raw.next().with_context(|| format!("{flag} needs a value"));
             match arg.as_str() {
                 "--config" => args.config = value("--config")?.into(),
-                "--import-memories" => {
-                    args.import_memories = Some(value("--import-memories")?.into())
-                }
                 "--import-keys" => args.import_keys = Some(value("--import-keys")?.into()),
                 "--backfill" => {
                     args.backfill = Some(
@@ -239,18 +229,6 @@ fn soul(state_dir: &Path) -> String {
         tracing::warn!("no SOUL.md found; running without a persona");
         String::new()
     })
-}
-
-/// Import runs against the same schema the bot uses and then exits, so the result can be verified before anything goes live.
-fn import_memories(db_path: &Path, legacy: &Path) -> Result<()> {
-    let mut conn = db::open(db_path)?;
-    let before = memory::count(&conn)?;
-    let taken = memory::import_legacy(&mut conn, legacy)?;
-    println!(
-        "imported {taken} rows ({before} -> {} total)",
-        memory::count(&conn)?
-    );
-    Ok(())
 }
 
 async fn import_keys(link: &mxlink::MatrixLink, path: &Path) -> Result<()> {
