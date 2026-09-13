@@ -174,9 +174,8 @@ fn system_prompt(soul: &str, incoming: &Incoming<'_>, now: &str) -> String {
 
     prompt.push_str(
         "\n\n## your machine\n\n         You have a persistent Linux sandbox and a workspace directory that survive between \
-         conversations. run_code executes bash or python there, starting in the workspace, \
-         and you are root inside it: install whatever you need with apk, pip or npm and it \
-         stays installed. Reach the internet with curl or wget from the shell rather than \
+         conversations in this room only. run_code executes bash or python there, starting in \
+         this room's workspace. The base system is read-only. Reach the internet with curl or wget from the shell rather than \
          asking for a tool. Nothing you do in there can touch anything else, so experiment \
          freely, but the LAN is unreachable by design.\n\n         Read, list and search with cat, ls and rg in the shell. Two things are tools rather \
          than shell commands because the shell cannot do them safely: write_file, which avoids \

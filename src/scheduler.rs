@@ -7,11 +7,7 @@ use crate::agent::{Agent, Incoming};
 use crate::cron::{self, Job};
 use crate::matrix::Bot;
 
-pub async fn start(
-    db: Arc<Mutex<rusqlite::Connection>>,
-    agent: Arc<Agent>,
-    bot: Arc<Bot>,
-) -> Result<()> {
+pub async fn start(dbs: Arc<crate::db::RoomDbs>, agent: Arc<Agent>, bot: Arc<Bot>) -> Result<()> {
     let scheduler = JobScheduler::new()
         .await
         .context("creating job scheduler")?;
@@ -21,21 +17,31 @@ pub async fn start(
         let mut live: HashMap<String, (uuid::Uuid, String)> = HashMap::new();
 
         loop {
-            let desired = match db.lock() {
-                Ok(conn) => cron::list(&conn).unwrap_or_default(),
-                Err(_) => Vec::new(),
-            };
+            let desired: Vec<(Arc<Mutex<rusqlite::Connection>>, Job)> = dbs
+                .all()
+                .flat_map(|(_, db)| {
+                    let jobs = db
+                        .lock()
+                        .map(|conn| cron::list(&conn).unwrap_or_default())
+                        .unwrap_or_default();
+                    jobs.into_iter().map(move |job| (Arc::clone(&db), job))
+                })
+                .collect();
 
-            let wanted: HashMap<String, Job> = desired
+            let wanted: HashMap<String, (Arc<Mutex<rusqlite::Connection>>, Job)> = desired
                 .into_iter()
-                .filter(|j| j.enabled)
-                .map(|j| (j.name.clone(), j))
+                .filter(|(_, job)| job.enabled)
+                .map(|(db, job)| (job_key(&job), (db, job)))
                 .collect();
 
             let stale: Vec<String> = live
                 .iter()
                 .filter(|(name, (_, fp))| {
-                    wanted.get(*name).map(fingerprint).as_deref() != Some(fp.as_str())
+                    wanted
+                        .get(*name)
+                        .map(|(_, job)| fingerprint(job))
+                        .as_deref()
+                        != Some(fp.as_str())
                 })
                 .map(|(name, _)| name.clone())
                 .collect();
@@ -48,14 +54,14 @@ pub async fn start(
                 }
             }
 
-            for (name, job) in &wanted {
+            for (name, (db, job)) in &wanted {
                 if live.contains_key(name) {
                     continue;
                 }
                 match register(
                     &scheduler,
                     job,
-                    Arc::clone(&db),
+                    Arc::clone(db),
                     Arc::clone(&agent),
                     Arc::clone(&bot),
                 )
@@ -84,6 +90,10 @@ fn fingerprint(job: &Job) -> String {
         "{}|{}|{}|{}",
         job.schedule, job.timezone, job.prompt, job.room_id
     )
+}
+
+fn job_key(job: &Job) -> String {
+    format!("{}|{}", job.room_id, job.name)
 }
 
 async fn register(

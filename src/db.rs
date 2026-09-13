@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, limits::Limit};
-use std::path::Path;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::embed;
 
@@ -70,6 +73,123 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   last_status TEXT
 );
 "#;
+
+pub struct RoomDbs {
+    rooms: HashMap<String, Arc<Mutex<Connection>>>,
+}
+
+impl RoomDbs {
+    pub fn open(state_dir: &Path, room_ids: &[String]) -> Result<Self> {
+        anyhow::ensure!(!room_ids.is_empty(), "cannot open databases without rooms");
+        let rooms_dir = state_dir.join("rooms");
+        std::fs::create_dir_all(&rooms_dir)
+            .with_context(|| format!("creating {}", rooms_dir.display()))?;
+
+        migrate_legacy(state_dir, &rooms_dir, room_ids)?;
+
+        let mut rooms = HashMap::new();
+        for room_id in room_ids {
+            let path = rooms_dir.join(format!("{}.db", room_key(room_id)));
+            rooms.insert(room_id.clone(), Arc::new(Mutex::new(open(&path)?)));
+        }
+        Ok(Self { rooms })
+    }
+
+    pub fn get(&self, room_id: &str) -> Result<Arc<Mutex<Connection>>> {
+        self.rooms
+            .get(room_id)
+            .cloned()
+            .with_context(|| format!("no database for room {room_id}"))
+    }
+
+    pub fn all(&self) -> impl Iterator<Item = (&str, Arc<Mutex<Connection>>)> + '_ {
+        self.rooms
+            .iter()
+            .map(|(id, db)| (id.as_str(), Arc::clone(db)))
+    }
+}
+
+pub fn room_key(room_id: &str) -> String {
+    format!("{:x}", Sha256::digest(room_id.as_bytes()))
+}
+
+fn migrate_legacy(state_dir: &Path, rooms_dir: &Path, room_ids: &[String]) -> Result<()> {
+    let legacy_path = state_dir.join("merlin.db");
+    let split_exists = ["memory.db", "messages.db", "cron.db"]
+        .iter()
+        .any(|name| state_dir.join(name).exists());
+    if !legacy_path.exists() && !split_exists {
+        return Ok(());
+    }
+
+    let mut legacy = open(&legacy_path)?;
+    migrate_from_split_files(&mut legacy, state_dir)?;
+    drop(legacy);
+
+    for (index, room_id) in room_ids.iter().enumerate() {
+        let path = rooms_dir.join(format!("{}.db", room_key(room_id)));
+        let conn = open(&path)?;
+        conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 1)?;
+        conn.execute(
+            "ATTACH DATABASE ?1 AS legacy",
+            [legacy_path.to_string_lossy().as_ref()],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO memories (id, key, content, category, room_id, created_at, updated_at)
+             SELECT id, key, content, category, ?1, created_at, updated_at FROM legacy.memories
+             WHERE room_id = ?1 OR (room_id IS NULL AND ?2 = 0)",
+            rusqlite::params![room_id, index],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO messages (event_id, room_id, sender, body, at)
+             SELECT event_id, room_id, sender, body, at FROM legacy.messages WHERE room_id = ?1",
+            [room_id],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO cron_jobs
+             (name, schedule, timezone, prompt, room_id, enabled, created_at, last_run, last_status)
+             SELECT name, schedule, timezone, prompt, room_id, enabled, created_at, last_run, last_status
+             FROM legacy.cron_jobs WHERE room_id = ?1",
+            [room_id],
+        )?;
+        conn.execute_batch("DETACH DATABASE legacy")?;
+        conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
+    }
+
+    let migrated = unique_migrated_path(&legacy_path);
+    std::fs::rename(&legacy_path, &migrated).with_context(|| {
+        format!(
+            "moving legacy database from {} to {}",
+            legacy_path.display(),
+            migrated.display()
+        )
+    })?;
+    for suffix in ["-wal", "-shm"] {
+        let path = PathBuf::from(format!("{}{}", legacy_path.display(), suffix));
+        if path.exists() {
+            std::fs::rename(
+                &path,
+                PathBuf::from(format!("{}{}", migrated.display(), suffix)),
+            )?;
+        }
+    }
+    tracing::info!(rooms = room_ids.len(), "split legacy database by room");
+    Ok(())
+}
+
+fn unique_migrated_path(path: &Path) -> PathBuf {
+    let first = path.with_extension("db.migrated");
+    if !first.exists() {
+        return first;
+    }
+    for index in 1.. {
+        let candidate = path.with_extension(format!("db.migrated.{index}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
 
 pub fn open(path: &Path) -> Result<Connection> {
     embed::register();

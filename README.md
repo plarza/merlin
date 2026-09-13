@@ -43,6 +43,10 @@ calling the chat model.
 
 ## storage
 
+Every room has a physically separate SQLite database and workspace. The legacy
+single database is split on first startup and retained only as an inaccessible
+`.migrated` backup.
+
 ```
 memories(id, key, content, category, room_id, created_at, updated_at)
 messages(event_id, room_id, sender, body, at)
@@ -59,7 +63,8 @@ moving the hardware          pure meaning, matches "relocating the machines"
 
 ## sandbox
 
-`bash` runs a script in a persistent Alpine root, via `sudo -u merlin-exec`.
+`bash` runs via `sudo -u merlin-exec` in a read-only Alpine root with only the
+current room's persistent workspace mounted.
 
 ## scheduling
 
@@ -73,7 +78,7 @@ cron_create(name="hn", schedule="0 7 * * *", prompt="post the top Hacker News st
 
 **2. keys.** `OPENROUTER_API_KEY` drives both chat and embeddings, so it is never optional. `EXA_API_KEY` is only read by `web_search`, `FAL_API_KEY` only when `image_provider = "fal"`.
 
-**3. config.** write the TOML below to `config.toml`, with `allowed_rooms` and `allowed_senders` filled in — both are rejected empty, since the bot would either join nothing or answer nobody. secrets stay in the environment; nothing in this file is private.
+**3. config.** write the TOML below to `config.toml`, with `allowed_rooms`, `allowed_senders` and `admin_senders` filled in — all are rejected empty, and every admin must also be an allowed sender. Only admins can use slash commands. Secrets stay in the environment; nothing in this file is private.
 
 **4a. nixos.** the module is the whole deployment: it creates the `merlin` and `merlin-exec` users, unpacks the sandbox root, writes the sudo rule that joins them, and firewalls executed code off the LAN.
 
@@ -98,7 +103,7 @@ install -d -m 0700 -o merlin -g merlin /var/lib/merlin
 install -d -m 2770 -o merlin -g merlin /var/lib/merlin-workspace
 ```
 
-the default sandbox runner is a NixOS path, so set `MERLIN_EXEC_RUNNER` to your own bubblewrap or container wrapper — it is invoked with a timeout in seconds and an address-space limit in kilobytes, and takes the script on stdin. leaving it unset costs you `bash` alone; every other tool still works.
+the default sandbox runner is a NixOS path, so set `MERLIN_EXEC_RUNNER` to your own bubblewrap or container wrapper — it is invoked with a timeout in seconds, an address-space limit in kilobytes, and an opaque room scope, and takes the script on stdin. leaving it unset costs you `bash` alone; every other tool still works.
 
 **5. first run.** start it and wait for `connected` in the log. history from before the bot joined is invisible until you page it in:
 
@@ -119,6 +124,7 @@ display_name = "merlin"
 
 allowed_rooms   = ["!room:matrix.example.org"]
 allowed_senders = ["@you:matrix.example.org"]
+admin_senders   = ["@you:matrix.example.org"]
 context_window  = 64
 timezone        = "Australia/Sydney"
 state_dir       = "/var/lib/merlin"
@@ -148,7 +154,7 @@ embed_batch        = 32
 | `FAL_API_KEY` | when `image_provider = "fal"` (`FAL_KEY` also accepted) |
 | `MATRIX_KEY_EXPORT_PASSPHRASE` | for `--import-keys` |
 | `SESSION_ENCRYPTION_KEY` | no, defaults to `MATRIX_PASSWORD` |
-| `MERLIN_ALLOWED_ROOMS`, `MERLIN_ALLOWED_SENDERS` | override the config file |
+| `MERLIN_ALLOWED_ROOMS`, `MERLIN_ALLOWED_SENDERS`, `MERLIN_ADMIN_SENDERS` | comma-separated overrides for the config file |
 | `MERLIN_EXEC_RUNNER` | override the sandbox command |
 
 `SOUL.md` is prepended to the system prompt.

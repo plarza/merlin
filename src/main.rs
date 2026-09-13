@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
-use rusqlite::Connection;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use merlin::agent::Agent;
@@ -14,7 +13,7 @@ use merlin::matrix::Bot;
 use merlin::room::{Buffers, Turn};
 use merlin::tools::Tools;
 use merlin::workspace::Workspace;
-use merlin::{backfill, db, embed, matrix, memory, messages, scheduler};
+use merlin::{backfill, db, embed, matrix, messages, scheduler};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,11 +26,9 @@ async fn main() -> Result<()> {
 
     let args = Args::parse()?;
     let config = Arc::new(Config::load(&args.config)?);
-    let db_path = config.state_dir.join("merlin.db");
-
     let secrets = Secrets::from_env()?;
-    let db = open_database(&db_path, &config.state_dir)?;
-    let runtime = Runtime::build(&config, &secrets, db)?;
+    let dbs = Arc::new(db::RoomDbs::open(&config.state_dir, &config.allowed_rooms)?);
+    let runtime = Runtime::build(&config, &secrets, dbs)?;
 
     let link = matrix::connect(&config, &secrets).await?;
     tracing::info!(user = %config.user_id, "connected");
@@ -40,7 +37,7 @@ async fn main() -> Result<()> {
         return import_keys(&link, path).await;
     }
     if let Some(pages) = args.backfill {
-        return backfill_history(&link, &config, &runtime.db, pages).await;
+        return backfill_history(&link, &config, &runtime.dbs, pages).await;
     }
 
     runtime.run(link, config).await
@@ -83,14 +80,14 @@ impl Args {
 }
 
 struct Runtime {
-    db: Arc<Mutex<Connection>>,
+    dbs: Arc<db::RoomDbs>,
     agent: Arc<Agent>,
     embedder: Arc<Embedder>,
     workspace: Arc<Workspace>,
 }
 
 impl Runtime {
-    fn build(config: &Arc<Config>, secrets: &Secrets, db: Arc<Mutex<Connection>>) -> Result<Self> {
+    fn build(config: &Arc<Config>, secrets: &Secrets, dbs: Arc<db::RoomDbs>) -> Result<Self> {
         let llm = Arc::new(Llm::new(
             secrets.openrouter_api_key.clone(),
             config.model.chat.clone(),
@@ -118,16 +115,17 @@ impl Runtime {
             config.limits.request_timeout_s,
         )?);
 
-        {
+        for (room_id, db) in dbs.all() {
             let conn = db.lock().unwrap();
             embed::ensure_table::<Memories>(&conn, embedder.model(), embedder.dimensions())?;
             embed::ensure_table::<Messages>(&conn, embedder.model(), embedder.dimensions())?;
             tracing::info!(
+                %room_id,
                 model = embedder.model(),
                 dimensions = embedder.dimensions(),
                 memories = embed::count_pending::<Memories>(&conn)?,
                 messages = embed::count_pending::<Messages>(&conn)?,
-                "semantic index ready"
+                "room database ready"
             );
         }
 
@@ -135,7 +133,7 @@ impl Runtime {
         tracing::info!(path = %workspace.root().display(), "workspace ready");
 
         let tools = Arc::new(Tools {
-            db: Arc::clone(&db),
+            dbs: Arc::clone(&dbs),
             workspace: Arc::clone(&workspace),
             sandbox: Arc::new(Sandbox::new(
                 exec_runner(),
@@ -170,7 +168,7 @@ impl Runtime {
         });
 
         Ok(Self {
-            db,
+            dbs,
             agent,
             embedder,
             workspace,
@@ -178,45 +176,40 @@ impl Runtime {
     }
 
     async fn run(self, link: mxlink::MatrixLink, config: Arc<Config>) -> Result<()> {
-        tokio::spawn(embed::run(
-            self.embedder,
-            Arc::clone(&self.db),
-            config.limits.embed_batch,
-        ));
+        for (_, db) in self.dbs.all() {
+            tokio::spawn(embed::run(
+                Arc::clone(&self.embedder),
+                db,
+                config.limits.embed_batch,
+            ));
+        }
 
         let bot = Arc::new(Bot {
             link,
             agent: Arc::clone(&self.agent),
-            buffers: seed_buffers(&self.db, &config),
-            db: Arc::clone(&self.db),
+            buffers: seed_buffers(&self.dbs, &config),
+            dbs: Arc::clone(&self.dbs),
             workspace: self.workspace,
             config: Arc::clone(&config),
         });
 
-        scheduler::start(self.db, self.agent, Arc::clone(&bot)).await?;
+        scheduler::start(self.dbs, self.agent, Arc::clone(&bot)).await?;
         bot.run().await
     }
 }
 
-fn open_database(path: &Path, state_dir: &Path) -> Result<Arc<Mutex<Connection>>> {
-    let mut conn = db::open(path)?;
-    match db::migrate_from_split_files(&mut conn, state_dir)? {
-        0 => {}
-        rows => tracing::info!(rows, "folded the old split databases into one"),
-    }
-    tracing::info!(
-        memories = memory::count(&conn)?,
-        messages = messages::count(&conn)?,
-        "database ready"
-    );
-    Ok(Arc::new(Mutex::new(conn)))
-}
-
-fn seed_buffers(db: &Mutex<Connection>, config: &Config) -> Arc<Buffers> {
+fn seed_buffers(dbs: &db::RoomDbs, config: &Config) -> Arc<Buffers> {
     let buffers = Arc::new(Buffers::new(config.context_window));
-    let conn = db.lock().unwrap();
 
     for room_id in &config.allowed_rooms {
+        let db = match dbs.get(room_id) {
+            Ok(db) => db,
+            Err(e) => {
+                tracing::warn!(%room_id, error = %e, "could not open room database");
+                continue;
+            }
+        };
+        let conn = db.lock().unwrap();
         match messages::recent(&conn, room_id, config.context_window) {
             Ok(rows) => {
                 let seeded = rows.len();
@@ -263,11 +256,11 @@ async fn import_keys(link: &mxlink::MatrixLink, path: &Path) -> Result<()> {
 async fn backfill_history(
     link: &mxlink::MatrixLink,
     config: &Config,
-    db: &Mutex<Connection>,
+    dbs: &db::RoomDbs,
     pages: usize,
 ) -> Result<()> {
     tokio::time::sleep(Duration::from_secs(5)).await;
-    let stats = backfill::run(link, config, db, pages).await?;
+    let stats = backfill::run(link, config, dbs, pages).await?;
     println!("backfill: {stats}");
 
     if stats.undecryptable > stats.archived {

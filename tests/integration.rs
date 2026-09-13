@@ -1,10 +1,12 @@
 use merlin::commands::Command;
+use merlin::config::Config;
 use merlin::cron::{self, Job};
 use merlin::embed::{self, Memories, Messages};
 use merlin::exec::Sandbox;
 use merlin::llm::{Attachment, Llm, Message};
 use merlin::room::{Buffers, Turn, is_addressed};
 use merlin::tools::definitions;
+use merlin::workspace::Workspace;
 use merlin::{db, memory, messages};
 use rusqlite::Connection;
 
@@ -23,6 +25,74 @@ fn scratch(name: &str) -> std::path::PathBuf {
 
 fn database(name: &str) -> Connection {
     db::open(&scratch(name).join("merlin.db")).unwrap()
+}
+
+#[test]
+fn workspaces_are_scoped_by_room() {
+    let workspace = Workspace::new(scratch("room-workspaces")).unwrap();
+    let a = workspace.scoped("!a:x").unwrap();
+    let b = workspace.scoped("!b:x").unwrap();
+    a.write("note.txt", "alpha").unwrap();
+    b.write("note.txt", "beta").unwrap();
+
+    assert_ne!(a.root(), b.root());
+    assert_eq!(
+        std::fs::read_to_string(a.root().join("note.txt")).unwrap(),
+        "alpha"
+    );
+    assert_eq!(
+        std::fs::read_to_string(b.root().join("note.txt")).unwrap(),
+        "beta"
+    );
+}
+
+#[test]
+fn legacy_data_is_split_into_physical_room_databases() {
+    let state = scratch("room-databases");
+    let legacy = db::open(&state.join("merlin.db")).unwrap();
+    memory::store(
+        &legacy,
+        "legacy",
+        "belongs to the original room",
+        "core",
+        None,
+    )
+    .unwrap();
+    memory::store(&legacy, "private-b", "only room b", "core", Some("!b:x")).unwrap();
+    messages::record(
+        &legacy,
+        "$a",
+        "!a:x",
+        "@a:x",
+        "alpha",
+        "2026-01-01T00:00:00Z",
+    )
+    .unwrap();
+    messages::record(
+        &legacy,
+        "$b",
+        "!b:x",
+        "@b:x",
+        "beta",
+        "2026-01-01T00:00:00Z",
+    )
+    .unwrap();
+    drop(legacy);
+
+    let rooms = db::RoomDbs::open(&state, &["!a:x".into(), "!b:x".into()]).unwrap();
+    let a = rooms.get("!a:x").unwrap();
+    let b = rooms.get("!b:x").unwrap();
+
+    assert_eq!(messages::count(&a.lock().unwrap()).unwrap(), 1);
+    assert_eq!(messages::count(&b.lock().unwrap()).unwrap(), 1);
+    assert_eq!(memory::count(&a.lock().unwrap()).unwrap(), 1);
+    assert_eq!(memory::count(&b.lock().unwrap()).unwrap(), 1);
+    assert!(state.join("merlin.db.migrated").exists());
+    assert_ne!(
+        db::room_key("!a:x"),
+        db::room_key("!b:x"),
+        "room database filenames must not collide"
+    );
 }
 
 #[test]
@@ -51,6 +121,27 @@ fn slash_commands_must_be_the_whole_message() {
     ] {
         assert_eq!(Command::parse(invalid), None, "accepted {invalid:?}");
     }
+}
+
+#[test]
+fn only_configured_admins_are_administrators() {
+    let path = scratch("admins").join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+homeserver = "https://matrix.example.org"
+user_id = "@merlin:matrix.example.org"
+display_name = "merlin"
+allowed_rooms = ["!room:example.org"]
+allowed_senders = ["@aiden:example.org", "@atlas:example.org"]
+admin_senders = ["@aiden:example.org"]
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(&path).unwrap();
+    assert!(config.is_admin("@aiden:example.org"));
+    assert!(!config.is_admin("@atlas:example.org"));
 }
 
 #[test]
@@ -666,7 +757,7 @@ async fn the_sandbox_runs_a_program_and_returns_its_output() {
         10,
         "1G".into(),
     );
-    let out = sb.run("echo 42").await.unwrap();
+    let out = sb.run("echo 42", "!room-a:example.org").await.unwrap();
     assert_eq!(out.stdout.trim(), "42");
     assert!(!out.timed_out);
 }
@@ -678,7 +769,7 @@ async fn a_wedged_program_is_killed_rather_than_hanging_the_turn() {
         1,
         "1G".into(),
     );
-    let out = sb.run("true").await.unwrap();
+    let out = sb.run("true", "!room-a:example.org").await.unwrap();
     assert!(out.timed_out);
     assert!(out.stderr.contains("killed"));
 }
@@ -878,12 +969,16 @@ async fn the_run_limits_reach_the_sandbox_as_arguments() {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let sb = Sandbox::new(vec![script.display().to_string()], 30, "1G".into());
-    let out = sb.run("echo hello").await.unwrap();
+    let out = sb.run("echo hello", "!room-a:example.org").await.unwrap();
 
     assert_eq!(
         out.stdout.lines().collect::<Vec<_>>(),
-        vec!["30", "1048576"],
-        "timeout in seconds, then the address space limit in kB"
+        vec![
+            "30",
+            "1048576",
+            merlin::db::room_key("!room-a:example.org").as_str()
+        ],
+        "timeout, address-space limit and opaque room scope"
     );
 }
 

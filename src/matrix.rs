@@ -64,7 +64,7 @@ pub struct Bot {
     pub link: MatrixLink,
     pub agent: Arc<Agent>,
     pub buffers: Arc<Buffers>,
-    pub db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    pub dbs: Arc<crate::db::RoomDbs>,
     pub workspace: Arc<crate::workspace::Workspace>,
     pub config: Arc<Config>,
 }
@@ -180,11 +180,18 @@ impl Bot {
         }
 
         let sender = event.sender.to_string();
+        let mut body = body;
+        let attachments = match attached {
+            Some(file) if self.config.is_allowed_sender(&sender) => {
+                self.receive(&room, &room_id, file, &mut body).await
+            }
+            _ => Vec::new(),
+        };
         self.remember(event.event_id.as_str(), &room_id, &sender, &body);
 
         if let Some(command) = Command::parse(&body) {
-            if !self.config.is_allowed_sender(&sender) {
-                tracing::info!(%sender, "command sent by a sender who is not allowed");
+            if !self.config.is_admin(&sender) {
+                tracing::info!(%sender, "command sent by a sender who is not an admin");
                 return Ok(());
             }
             return self.run_command(&room, command).await;
@@ -200,7 +207,7 @@ impl Bot {
             room_id,
             sender,
             body,
-            attached,
+            attachments,
             reply_parent.map(|(_, body)| body),
         )
         .await
@@ -251,7 +258,11 @@ impl Bot {
         );
 
         let at = chrono::Utc::now().to_rfc3339();
-        let conn = self.db.lock().unwrap();
+        let Ok(db) = self.dbs.get(room_id) else {
+            tracing::warn!(%room_id, "no database while archiving message");
+            return;
+        };
+        let conn = db.lock().unwrap();
         if let Err(e) = crate::messages::record(&conn, event_id, room_id, sender, body, &at) {
             tracing::warn!(error = %e, "failed archiving message");
         }
@@ -311,7 +322,7 @@ impl Bot {
         room_id: String,
         sender: String,
         body: String,
-        attached: Option<Attached>,
+        attachments: Vec<Attachment>,
         reply_parent: Option<String>,
     ) -> Result<()> {
         let ambient = self.buffers.render(&room_id, true);
@@ -320,12 +331,6 @@ impl Bot {
         let started = std::time::Instant::now();
 
         let typing = Typing::start(room.clone());
-
-        let mut body = body;
-        let attachments = match attached {
-            Some(file) => self.receive(&room, file, &mut body).await,
-            None => Vec::new(),
-        };
 
         let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel::<String>();
         let pump = {
@@ -420,7 +425,13 @@ impl Bot {
             .with_context(|| format!("not joined to room {room_id}"))
     }
 
-    async fn receive(&self, room: &Room, file: Attached, body: &mut String) -> Vec<Attachment> {
+    async fn receive(
+        &self,
+        room: &Room,
+        room_id: &str,
+        file: Attached,
+        body: &mut String,
+    ) -> Vec<Attachment> {
         let request = MediaRequestParameters {
             source: file.source,
             format: MediaFormat::File,
@@ -445,7 +456,14 @@ impl Bot {
             return Vec::new();
         }
 
-        match self.workspace.save_incoming(&file.name, &bytes) {
+        let workspace = match self.workspace.scoped(room_id) {
+            Ok(workspace) => workspace,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not open room workspace");
+                return Vec::new();
+            }
+        };
+        match workspace.save_incoming(&file.name, &bytes) {
             Ok(path) => {
                 tracing::info!(%path, bytes = bytes.len(), viewable = file.viewable, "attachment saved");
                 body.push_str(&format!(" (saved at {path})"));

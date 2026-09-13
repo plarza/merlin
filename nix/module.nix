@@ -24,7 +24,7 @@ let
   sandboxWrapper = pkgs.writeShellApplication {
     name = "merlin-sandbox-configured";
     text = ''
-      export MERLIN_SANDBOX_ROOT=${cfg.sandboxRoot}
+      export MERLIN_SANDBOX_ROOT=${cfg.sandboxRoot}/base
       export MERLIN_WORKSPACE=${cfg.workspaceDir}
       exec ${lib.getExe sandboxPkg} "$@"
     '';
@@ -48,9 +48,8 @@ in
       type = types.path;
       default = "/var/lib/merlin-sandbox";
       description = ''
-        Persistent root filesystem for executed code. The agent is root inside
-        it and may install whatever it likes; nothing here is visible to the
-        rest of the host.
+        Base root filesystem for executed code. It is mounted read-only so
+        durable data can only live in the room-scoped workspace.
       '';
     };
 
@@ -173,8 +172,8 @@ in
       "L+ ${cfg.stateDir}/config.toml - - - - ${configFile}"
     ];
 
-    # Unpacks the base userland once. Anything the agent installs afterwards
-    # persists, and re-running this never overwrites it.
+    # Unpacks a clean base userland once. It is mounted read-only at runtime;
+    # the old mutable root is deliberately outside this base and never exposed.
     systemd.services.merlin-sandbox-init = {
       description = "Initialise merlin's sandbox root";
       wantedBy = [ "multi-user.target" ];
@@ -186,7 +185,8 @@ in
       };
       script = ''
         set -eu
-        root="${cfg.sandboxRoot}"
+        root="${cfg.sandboxRoot}/base"
+        mkdir -p "$root"
         if [ ! -x "$root/bin/busybox" ]; then
           echo "unpacking base userland into $root"
           tar -xzf ${rootfsTarball} -C "$root"
@@ -200,13 +200,12 @@ in
         chown merlin-exec:merlin-exec "$root/etc/resolv.conf"
         mkdir -p "$root/work"
 
-        # A useful starting point rather than a bare busybox. The agent can add
-        # anything else itself, and whatever it adds persists.
+        # Install the fixed toolset before the root becomes read-only at runtime.
         if [ ! -x "$root/usr/bin/curl" ]; then
           echo "installing base tools"
           chroot "$root" /sbin/apk add --no-cache \
             bash curl git jq python3 py3-pip ripgrep file tar || \
-            echo "base tool install failed; the agent can still apk add later" >&2
+            echo "base tool install failed" >&2
           chown -R merlin-exec:merlin-exec "$root"
         fi
       '';
@@ -242,7 +241,11 @@ in
         NoNewPrivileges = false;
         ProtectHome = true;
         PrivateTmp = true;
-        ProtectKernelTunables = true;
+        # This remaps /proc/sys inside the service mount namespace, which makes
+        # a descendant bubblewrap unable to mount the fresh /proc required by
+        # its PID namespace. Both service users are unprivileged, so leaving
+        # the host view in place does not let either of them change sysctls.
+        ProtectKernelTunables = false;
         ProtectControlGroups = true;
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
         SupplementaryGroups = [ "merlin-work" ];

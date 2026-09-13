@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::agent::Progress;
 use crate::config::Config;
@@ -13,7 +13,7 @@ use crate::workspace::{Edit, Workspace};
 use crate::{cron, db, memory, messages};
 
 pub struct Tools {
-    pub db: Arc<Mutex<rusqlite::Connection>>,
+    pub dbs: Arc<db::RoomDbs>,
     pub sandbox: Arc<Sandbox>,
     pub workspace: Arc<Workspace>,
     pub images: Arc<ImageGen>,
@@ -145,13 +145,13 @@ pub fn definitions() -> Vec<Value> {
         ),
         f(
             "bash",
-            "Run a bash script in your sandbox and return its output. It starts in the workspace, so files you wrote are there and anything it writes persists for later turns. You are root in there and it keeps what you install, so apk add, pip install and npm i all work. Reach python with python3, and the internet with curl. The LAN is unreachable and no secret is visible.",
+            "Run a bash script in this room's isolated sandbox and return its output. It starts in this room's workspace, so workspace files persist for later turns in this room only. The base system is read-only and includes bash, curl, git, jq, Python, pip, ripgrep, file and tar. The public internet works; the LAN and every other room's data are unreachable.",
             json!({ "script": { "type": "string" } }),
             &["script"],
         ),
         f(
             "sql_query",
-            "Run a read-only SQL query against merlin's database, which holds memories, the full message archive and the scheduled jobs in one file. Use this for counting, grouping, joining and any question the search tools do not shape well, such as who sends the most messages or what was stored in a given week.\n\nThe engine is SQLite. Only SQLite's own functions exist. Split text with a recursive CTE. Schema:\n\nmemories(id, key, content, category, room_id, created_at, updated_at)\nmessages(event_id, room_id, sender, body, at)\ncron_jobs(name, schedule, timezone, prompt, room_id, enabled, created_at, last_run, last_status)\n\nsender is a full Matrix ID including the leading @ and the homeserver, e.g. '@alice:example.org'. Run SELECT sender, count(*) FROM messages GROUP BY sender first and use the exact values.\n\nNote that curly and straight apostrophes are different characters, so one person's \"it's\" may not match another's; normalise with replace(body, char(8217), char(39)) when that matters.\n\nSELECT, WITH and EXPLAIN only; writes are refused. Use memory_store and cron_create to change things.",
+            "Run a read-only SQL query against this room's physically separate database. It contains only this room's memories, message archive and scheduled jobs; other rooms cannot be attached or queried. Use this for counting, grouping, joining and questions the search tools do not shape well.\n\nThe engine is SQLite. Schema:\n\nmemories(id, key, content, category, room_id, created_at, updated_at)\nmessages(event_id, room_id, sender, body, at)\ncron_jobs(name, schedule, timezone, prompt, room_id, enabled, created_at, last_run, last_status)\n\nSELECT, WITH and EXPLAIN only; writes and ATTACH are refused. Use memory_store and cron_create to change things.",
             json!({
                 "query": { "type": "string", "description": "A single SELECT, WITH or EXPLAIN statement" },
                 "limit": { "type": "integer", "description": "Max rows returned, default 50" }
@@ -199,29 +199,30 @@ impl Tools {
 
     async fn run(&self, name: &str, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
         match name {
-            "memory_recall" => self.memory_recall(args).await,
+            "memory_recall" => self.memory_recall(args, ctx).await,
             "memory_store" => self.memory_store(args, ctx),
-            "memory_forget" => self.memory_forget(args),
-            "search_messages" => self.search_messages(args).await,
-            "sql_query" => self.sql_query(args),
+            "memory_forget" => self.memory_forget(args, ctx),
+            "search_messages" => self.search_messages(args, ctx).await,
+            "sql_query" => self.sql_query(args, ctx),
             "send_message" => self.send_message(args, ctx),
             "web_search" => self.web_search(args).await,
             "web_fetch" => self.web_fetch(args).await,
             "generate_image" => self.generate_image(args).await,
-            "bash" => self.bash(args).await,
-            "write_file" => self.write_file(args),
-            "edit_file" => self.edit_file(args),
+            "bash" => self.bash(args, ctx).await,
+            "write_file" => self.write_file(args, ctx),
+            "edit_file" => self.edit_file(args, ctx),
             "cron_create" => self.cron_create(args, ctx),
-            "cron_delete" => self.cron_delete(args),
+            "cron_delete" => self.cron_delete(args, ctx),
             other => anyhow::bail!("unknown tool '{other}'"),
         }
     }
 
-    async fn memory_recall(&self, args: &Value) -> Result<Outcome> {
+    async fn memory_recall(&self, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
         let query = str_arg(args, "query")?;
         let vector = self.embed_loose(&query).await;
+        let db = self.dbs.get(ctx.room_id)?;
         let hits = memory::recall(
-            &self.db.lock().unwrap(),
+            &db.lock().unwrap(),
             &query,
             vector.as_deref(),
             limit(args, 8, 25),
@@ -239,8 +240,9 @@ impl Tools {
             .get("category")
             .and_then(Value::as_str)
             .unwrap_or("core");
+        let db = self.dbs.get(ctx.room_id)?;
         memory::store(
-            &self.db.lock().unwrap(),
+            &db.lock().unwrap(),
             &key,
             &str_arg(args, "content")?,
             category,
@@ -249,10 +251,11 @@ impl Tools {
         Ok(Outcome::Text(format!("Stored under '{key}'.")))
     }
 
-    fn memory_forget(&self, args: &Value) -> Result<Outcome> {
+    fn memory_forget(&self, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
         let key = str_arg(args, "key")?;
+        let db = self.dbs.get(ctx.room_id)?;
         Ok(Outcome::Text(
-            if memory::forget(&self.db.lock().unwrap(), &key)? {
+            if memory::forget(&db.lock().unwrap(), &key)? {
                 format!("Deleted '{key}'.")
             } else {
                 format!("No memory under '{key}'.")
@@ -260,11 +263,12 @@ impl Tools {
         ))
     }
 
-    async fn search_messages(&self, args: &Value) -> Result<Outcome> {
+    async fn search_messages(&self, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
         let query = str_arg(args, "query")?;
         let vector = self.embed_loose(&query).await;
+        let db = self.dbs.get(ctx.room_id)?;
         let hits = messages::search(
-            &self.db.lock().unwrap(),
+            &db.lock().unwrap(),
             &query,
             vector.as_deref(),
             limit(args, 8, 30),
@@ -276,10 +280,11 @@ impl Tools {
         }))
     }
 
-    fn sql_query(&self, args: &Value) -> Result<Outcome> {
+    fn sql_query(&self, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
         let query = str_arg(args, "query")?;
+        let db = self.dbs.get(ctx.room_id)?;
         Ok(Outcome::Text(db::query(
-            &self.db.lock().unwrap(),
+            &db.lock().unwrap(),
             &query,
             limit(args, 50, 500),
         )?))
@@ -383,8 +388,11 @@ impl Tools {
         })
     }
 
-    async fn bash(&self, args: &Value) -> Result<Outcome> {
-        let out = self.sandbox.run(&str_arg(args, "script")?).await?;
+    async fn bash(&self, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
+        let out = self
+            .sandbox
+            .run(&str_arg(args, "script")?, ctx.room_id)
+            .await?;
 
         let mut report = out.stdout;
         if !out.stderr.is_empty() {
@@ -401,14 +409,14 @@ impl Tools {
         Ok(Outcome::Text(report))
     }
 
-    fn write_file(&self, args: &Value) -> Result<Outcome> {
-        Ok(Outcome::Text(self.workspace.write(
+    fn write_file(&self, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
+        Ok(Outcome::Text(self.workspace.scoped(ctx.room_id)?.write(
             &str_arg(args, "path")?,
             &str_arg(args, "content")?,
         )?))
     }
 
-    fn edit_file(&self, args: &Value) -> Result<Outcome> {
+    fn edit_file(&self, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
         let edits = args
             .get("edits")
             .and_then(Value::as_array)
@@ -422,7 +430,9 @@ impl Tools {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Outcome::Text(
-            self.workspace.edit(&str_arg(args, "path")?, &edits)?,
+            self.workspace
+                .scoped(ctx.room_id)?
+                .edit(&str_arg(args, "path")?, &edits)?,
         ))
     }
 
@@ -440,17 +450,19 @@ impl Tools {
             enabled: true,
         };
         job.validate()?;
-        cron::upsert(&self.db.lock().unwrap(), &job)?;
+        let db = self.dbs.get(ctx.room_id)?;
+        cron::upsert(&db.lock().unwrap(), &job)?;
         Ok(Outcome::Text(format!(
             "Scheduled '{}' at '{}'. The reconcile loop picks it up within a minute.",
             job.name, job.schedule
         )))
     }
 
-    fn cron_delete(&self, args: &Value) -> Result<Outcome> {
+    fn cron_delete(&self, args: &Value, ctx: &Ctx<'_>) -> Result<Outcome> {
         let name = str_arg(args, "name")?;
+        let db = self.dbs.get(ctx.room_id)?;
         Ok(Outcome::Text(
-            if cron::delete(&self.db.lock().unwrap(), &name)? {
+            if cron::delete(&db.lock().unwrap(), &name)? {
                 format!("Deleted job '{name}'.")
             } else {
                 format!("No job named '{name}'.")

@@ -24,6 +24,10 @@ impl Workspace {
         &self.root
     }
 
+    pub fn scoped(&self, room_id: &str) -> Result<Self> {
+        Self::new(self.root.join(crate::db::room_key(room_id)))
+    }
+
     fn resolve(&self, path: &str) -> Result<PathBuf> {
         let mut out = self.root.clone();
         for component in Path::new(path.trim_start_matches('/')).components() {

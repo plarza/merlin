@@ -28,7 +28,7 @@ impl Sandbox {
         }
     }
 
-    pub async fn run(&self, source: &str) -> Result<Output> {
+    pub async fn run(&self, source: &str, room_id: &str) -> Result<Output> {
         let (program, args) = self
             .runner
             .split_first()
@@ -38,6 +38,7 @@ impl Sandbox {
         cmd.args(args)
             .arg(self.timeout.as_secs().to_string())
             .arg(address_space_kb(&self.memory_max).to_string())
+            .arg(crate::db::room_key(room_id))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

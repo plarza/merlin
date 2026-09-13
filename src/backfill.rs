@@ -1,14 +1,11 @@
 use anyhow::{Context, Result};
-use rusqlite::Connection;
-use std::sync::Mutex;
-
 use mxlink::MatrixLink;
 use mxlink::matrix_sdk::room::MessagesOptions;
 use mxlink::matrix_sdk::ruma::events::{AnyMessageLikeEventContent, AnySyncTimelineEvent};
 use mxlink::matrix_sdk::ruma::{RoomId, UInt};
 
 use crate::config::Config;
-use crate::messages;
+use crate::{db::RoomDbs, messages};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -32,13 +29,14 @@ impl std::fmt::Display for Stats {
 pub async fn run(
     link: &MatrixLink,
     config: &Config,
-    db: &Mutex<Connection>,
+    dbs: &RoomDbs,
     max_pages: usize,
 ) -> Result<Stats> {
     let client = link.client();
     let mut total = Stats::default();
 
     for room_id in &config.allowed_rooms {
+        let db = dbs.get(room_id)?;
         let parsed = RoomId::parse(room_id)
             .map_err(|e| anyhow::anyhow!("invalid room id '{room_id}': {e}"))?;
         let Some(room) = client.get_room(&parsed) else {

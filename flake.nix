@@ -55,10 +55,8 @@
       });
 
       legacyPackages = forAll (pkgs: nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-        # The base userland for the sandbox, unpacked once into a persistent
-        # directory. Alpine rather than a Nix closure because the point is that
-        # the agent can install its own tools, and apk is a package manager it
-        # can drive on its own.
+        # The base userland for the sandbox, unpacked once and mounted read-only.
+        # Alpine keeps the runtime compact while still providing ordinary tools.
         sandbox-rootfs =
           let
             version = "3.24.1";
@@ -80,7 +78,7 @@
           };
 
         # The only thing merlin may invoke through sudo. It takes a script on
-        # stdin and runs it inside a persistent root with no view of the host.
+        # stdin and runs it inside a read-only root with no view of the host.
         merlin-sandbox = pkgs.writeShellApplication {
           name = "merlin-sandbox";
           runtimeInputs = with pkgs; [ bubblewrap coreutils ];
@@ -91,8 +89,22 @@
             # so anything exported by the caller is stripped before this runs.
             timeout_s="''${1:-60}"
             address_space_kb="''${2:-0}"
+            scope="''${3:-0000000000000000000000000000000000000000000000000000000000000000}"
             root="''${MERLIN_SANDBOX_ROOT:-/var/lib/merlin-sandbox}"
-            work="''${MERLIN_WORKSPACE:-/var/lib/merlin-workspace}"
+            work_base="''${MERLIN_WORKSPACE:-/var/lib/merlin-workspace}"
+
+            case "$scope" in
+              *[!0-9a-f]*) echo "invalid sandbox scope" >&2; exit 2 ;;
+            esac
+            if [ "''${#scope}" -ne 64 ]; then
+              echo "invalid sandbox scope" >&2
+              exit 2
+            fi
+            umask 007
+            work="$work_base/$scope"
+            # Bind destinations must already exist because the base root is
+            # mounted read-only before bwrap applies the room/job mounts.
+            mkdir -p "$work" "$root/work" "$root/job"
 
             if [ ! -x "$root/bin/busybox" ]; then
               echo "sandbox root at $root is not initialised" >&2
@@ -106,8 +118,6 @@
             # The workspace is shared with the bot through a group, and the
             # default 022 would leave everything the sandbox writes read-only to
             # it, so edit_file would fail on the sandbox's own output.
-            umask 007
-
             # A runaway process count is the one resource bwrap does not bound,
             # and a fork bomb inside the namespace is still host processes.
             ulimit -u 512 || true
@@ -117,11 +127,13 @@
             fi
 
             # --unshare-all drops every namespace, --share-net puts the network
-            # back so the agent can fetch and install things. --unshare-user
-            # with --uid 0 makes it root inside its own root only: apk works,
-            # while the host sees an unprivileged uid that the firewall matches
+            # back so the agent can fetch public resources. --unshare-user with
+            # --uid 0 makes it root inside its own read-only root, while the host
+            # sees an unprivileged uid that the firewall matches
             # on. Nothing from the host is bound in, so there is no path to
-            # /nix/store, /var/lib/merlin or /run/secrets to begin with.
+            # /nix/store, /var/lib/merlin or /run/secrets to begin with. The
+            # root is read-only and only this room's workspace is mounted, so
+            # executed code cannot persist or read information across rooms.
             exec timeout --signal=KILL "$timeout_s" \
               bwrap \
                 --unshare-all --share-net \
@@ -129,12 +141,13 @@
                 --cap-drop ALL \
                 --die-with-parent \
                 --new-session \
-                --bind "$root" / \
+                --ro-bind "$root" / \
                 --bind "$work" /work \
                 --ro-bind "$job" /job \
                 --proc /proc \
                 --dev /dev \
                 --tmpfs /run \
+                --tmpfs /tmp \
                 --chdir /work \
                 --setenv HOME /root \
                 --setenv PATH /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \

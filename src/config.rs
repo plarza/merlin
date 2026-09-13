@@ -14,6 +14,9 @@ pub struct Config {
     #[serde(default)]
     pub allowed_senders: Vec<String>,
 
+    #[serde(default)]
+    pub admin_senders: Vec<String>,
+
     #[serde(default = "default_context_window")]
     pub context_window: usize,
 
@@ -86,6 +89,16 @@ impl Config {
         if config.allowed_senders.is_empty() {
             anyhow::bail!("allowed_senders is empty; nobody could address the bot");
         }
+        if config.admin_senders.is_empty() {
+            anyhow::bail!("admin_senders is empty; nobody could use administrative commands");
+        }
+        if let Some(admin) = config
+            .admin_senders
+            .iter()
+            .find(|admin| !config.allowed_senders.contains(admin))
+        {
+            anyhow::bail!("admin sender {admin} is not also an allowed sender");
+        }
         Ok(config)
     }
 
@@ -95,6 +108,9 @@ impl Config {
         }
         if let Some(senders) = list_from_env("MERLIN_ALLOWED_SENDERS") {
             self.allowed_senders = senders;
+        }
+        if let Some(admins) = list_from_env("MERLIN_ADMIN_SENDERS") {
+            self.admin_senders = admins;
         }
     }
 
@@ -118,6 +134,10 @@ impl Config {
 
     pub fn is_allowed_sender(&self, sender: &str) -> bool {
         self.allowed_senders.iter().any(|s| s == sender)
+    }
+
+    pub fn is_admin(&self, sender: &str) -> bool {
+        self.admin_senders.iter().any(|s| s == sender)
     }
 }
 
