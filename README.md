@@ -69,7 +69,7 @@ cron_create(name="hn", schedule="0 7 * * *", prompt="post the top Hacker News st
 
 ## setup
 
-**1. matrix.** register an account for the bot on your homeserver and sign into it once from a normal client. merlin never accepts invitations, so use that session to join every room it should answer in, and keep it: merlin keeps no key backup, so that session is where room keys for older history have to come from. take the internal room id out of the room's settings (`!abc:matrix.example.org`, not the `#alias`); `allowed_rooms` matches on that.
+**1. matrix.** register an account for the bot on your homeserver and sign into it once from a normal client. add each room's internal id (`!abc:matrix.example.org`, not the `#alias`) to `allowed_rooms`, then invite the bot; merlin accepts allowlisted invitations and rejects the rest. keep the normal client session: merlin keeps no key backup, so that session is where room keys for older history have to come from.
 
 **2. keys.** `OPENROUTER_API_KEY` drives both chat and embeddings, so it is never optional. `EXA_API_KEY` is only read by `web_search`, `FAL_API_KEY` only when `image_provider = "fal"`.
 

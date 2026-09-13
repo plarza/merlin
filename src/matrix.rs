@@ -10,8 +10,8 @@ use mxlink::matrix_sdk::ruma::events::room::message::{
 };
 use mxlink::matrix_sdk::ruma::events::typing::SyncTypingEvent;
 use mxlink::{
-    CallbackError, InitConfig, LoginConfig, LoginCredentials, MatrixLink, MessageResponseType,
-    PersistenceConfig,
+    CallbackError, InitConfig, InvitationDecision, LoginConfig, LoginCredentials, MatrixLink,
+    MessageResponseType, PersistenceConfig,
 };
 
 use crate::agent::{Agent, Incoming};
@@ -108,6 +108,18 @@ pub async fn connect(config: &Config, secrets: &Secrets) -> Result<MatrixLink> {
 impl Bot {
     pub async fn run(self: Arc<Self>) -> Result<()> {
         let link = self.link.clone();
+
+        let invite_config = Arc::clone(&self.config);
+        link.rooms().on_invitation(move |_event, room| {
+            let config = Arc::clone(&invite_config);
+            async move {
+                Ok(if config.is_allowed_room(room.room_id().as_str()) {
+                    InvitationDecision::Join
+                } else {
+                    InvitationDecision::Reject
+                })
+            }
+        });
 
         let for_handler = Arc::clone(&self);
         link.messaging()
