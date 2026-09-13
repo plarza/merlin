@@ -121,6 +121,21 @@ impl Bot {
             }
         });
 
+        for room in link.client().invited_rooms() {
+            if self.config.is_allowed_room(room.room_id().as_str()) {
+                match room.join().await {
+                    Ok(()) => {
+                        tracing::info!(room_id = %room.room_id(), "accepted stored invitation")
+                    }
+                    Err(error) => {
+                        tracing::warn!(room_id = %room.room_id(), %error, "failed to accept stored invitation")
+                    }
+                }
+            } else if let Err(error) = room.leave().await {
+                tracing::warn!(room_id = %room.room_id(), %error, "failed to reject stored invitation");
+            }
+        }
+
         let for_handler = Arc::clone(&self);
         link.messaging()
             .on_actionable_room_message(move |event, room| {
