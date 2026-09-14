@@ -17,6 +17,9 @@ pub struct Config {
     #[serde(default)]
     pub admin_senders: Vec<String>,
 
+    #[serde(default)]
+    pub untrusted_senders: Vec<String>,
+
     #[serde(default = "default_context_window")]
     pub context_window: usize,
 
@@ -99,6 +102,20 @@ impl Config {
         {
             anyhow::bail!("admin sender {admin} is not also an allowed sender");
         }
+        if let Some(sender) = config
+            .untrusted_senders
+            .iter()
+            .find(|sender| !config.allowed_senders.contains(sender))
+        {
+            anyhow::bail!("untrusted sender {sender} is not also an allowed sender");
+        }
+        if let Some(sender) = config
+            .untrusted_senders
+            .iter()
+            .find(|sender| config.admin_senders.contains(sender))
+        {
+            anyhow::bail!("sender {sender} cannot be both an admin and untrusted");
+        }
         Ok(config)
     }
 
@@ -111,6 +128,9 @@ impl Config {
         }
         if let Some(admins) = list_from_env("MERLIN_ADMIN_SENDERS") {
             self.admin_senders = admins;
+        }
+        if let Some(senders) = list_from_env("MERLIN_UNTRUSTED_SENDERS") {
+            self.untrusted_senders = senders;
         }
     }
 
@@ -139,6 +159,25 @@ impl Config {
     pub fn is_admin(&self, sender: &str) -> bool {
         self.admin_senders.iter().any(|s| s == sender)
     }
+
+    pub fn trust_level(&self, sender: &str) -> TrustLevel {
+        if self.is_admin(sender) {
+            TrustLevel::Admin
+        } else if self.untrusted_senders.iter().any(|s| s == sender) {
+            TrustLevel::Untrusted
+        } else if self.is_allowed_sender(sender) {
+            TrustLevel::Trusted
+        } else {
+            TrustLevel::Untrusted
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustLevel {
+    Admin,
+    Trusted,
+    Untrusted,
 }
 
 impl Secrets {

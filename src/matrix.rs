@@ -326,6 +326,7 @@ impl Bot {
         reply_parent: Option<String>,
     ) -> Result<()> {
         let ambient = self.buffers.render(&room_id, true);
+        let trust = self.config.trust_level(&sender);
 
         tracing::info!(%sender, chars = body.len(), "turn started");
         let started = std::time::Instant::now();
@@ -362,6 +363,7 @@ impl Bot {
                     ambient,
                     reply_parent,
                     attachments,
+                    trust,
                 },
                 Some(&progress),
             )

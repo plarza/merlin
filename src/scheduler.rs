@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use tokio_cron_scheduler::{Job as CronJob, JobScheduler};
 
 use crate::agent::{Agent, Incoming};
+use crate::config::TrustLevel;
 use crate::cron::{self, Job};
 use crate::matrix::Bot;
 
@@ -158,6 +159,7 @@ async fn run_once(job: &Job, agent: &Agent, bot: &Arc<Bot>) -> Result<()> {
                 ambient: None,
                 reply_parent: None,
                 attachments: Vec::new(),
+                trust: TrustLevel::Admin,
             },
             Some(&progress),
         )

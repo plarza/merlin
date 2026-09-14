@@ -135,6 +135,7 @@ display_name = "merlin"
 allowed_rooms = ["!room:example.org"]
 allowed_senders = ["@aiden:example.org", "@atlas:example.org"]
 admin_senders = ["@aiden:example.org"]
+untrusted_senders = ["@atlas:example.org"]
 "#,
     )
     .unwrap();
@@ -142,6 +143,41 @@ admin_senders = ["@aiden:example.org"]
     let config = Config::load(&path).unwrap();
     assert!(config.is_admin("@aiden:example.org"));
     assert!(!config.is_admin("@atlas:example.org"));
+    assert_eq!(
+        config.trust_level("@aiden:example.org"),
+        merlin::config::TrustLevel::Admin
+    );
+    assert_eq!(
+        config.trust_level("@atlas:example.org"),
+        merlin::config::TrustLevel::Untrusted
+    );
+}
+
+#[test]
+fn trust_roles_must_be_consistent_with_access_roles() {
+    for (name, untrusted) in [
+        ("not-allowed", "@stranger:example.org"),
+        ("also-admin", "@aiden:example.org"),
+    ] {
+        let path = scratch(name).join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+homeserver = "https://matrix.example.org"
+user_id = "@merlin:matrix.example.org"
+display_name = "merlin"
+allowed_rooms = ["!room:example.org"]
+allowed_senders = ["@aiden:example.org", "@atlas:example.org"]
+admin_senders = ["@aiden:example.org"]
+untrusted_senders = ["{untrusted}"]
+"#
+            ),
+        )
+        .unwrap();
+
+        assert!(Config::load(&path).is_err());
+    }
 }
 
 #[test]

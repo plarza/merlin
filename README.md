@@ -78,7 +78,7 @@ cron_create(name="hn", schedule="0 7 * * *", prompt="post the top Hacker News st
 
 **2. keys.** `OPENROUTER_API_KEY` drives both chat and embeddings, so it is never optional. `EXA_API_KEY` is only read by `web_search`, `FAL_API_KEY` only when `image_provider = "fal"`.
 
-**3. config.** write the TOML below to `config.toml`, with `allowed_rooms`, `allowed_senders` and `admin_senders` filled in — all are rejected empty, and every admin must also be an allowed sender. Only admins can use slash commands. Secrets stay in the environment; nothing in this file is private.
+**3. config.** write the TOML below to `config.toml`, with `allowed_rooms`, `allowed_senders` and `admin_senders` filled in — all are rejected empty, and every admin must also be an allowed sender. Put allowed people whose requests should be treated as untrusted in `untrusted_senders`; this changes the system prompt but does not restrict their tools. Untrusted senders cannot be admins. Only admins can use slash commands. Secrets stay in the environment; nothing in this file is private.
 
 **4a. nixos.** the module is the whole deployment: it creates the `merlin` and `merlin-exec` users, unpacks the sandbox root, writes the sudo rule that joins them, and firewalls executed code off the LAN.
 
@@ -125,6 +125,7 @@ display_name = "merlin"
 allowed_rooms   = ["!room:matrix.example.org"]
 allowed_senders = ["@you:matrix.example.org"]
 admin_senders   = ["@you:matrix.example.org"]
+untrusted_senders = ["@guest:matrix.example.org"]
 context_window  = 64
 timezone        = "Australia/Sydney"
 state_dir       = "/var/lib/merlin"
@@ -154,7 +155,7 @@ embed_batch        = 32
 | `FAL_API_KEY` | when `image_provider = "fal"` (`FAL_KEY` also accepted) |
 | `MATRIX_KEY_EXPORT_PASSPHRASE` | for `--import-keys` |
 | `SESSION_ENCRYPTION_KEY` | no, defaults to `MATRIX_PASSWORD` |
-| `MERLIN_ALLOWED_ROOMS`, `MERLIN_ALLOWED_SENDERS`, `MERLIN_ADMIN_SENDERS` | comma-separated overrides for the config file |
+| `MERLIN_ALLOWED_ROOMS`, `MERLIN_ALLOWED_SENDERS`, `MERLIN_ADMIN_SENDERS`, `MERLIN_UNTRUSTED_SENDERS` | comma-separated overrides for the config file |
 | `MERLIN_EXEC_RUNNER` | override the sandbox command |
 
 `SOUL.md` is prepended to the system prompt.
